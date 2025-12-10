@@ -1,0 +1,4 @@
+numpy>=1.24.0
+pycaw>=20230407
+comtypes>=1.2.0
+pyinstaller>=6.0.0
