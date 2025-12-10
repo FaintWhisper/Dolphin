@@ -2,6 +2,13 @@
 echo Building Tame executable...
 echo.
 
+REM Kill any running Tame processes
+taskkill /F /IM Tame.exe >nul 2>&1
+if %errorlevel% equ 0 (
+    echo Stopped running Tame process.
+    echo.
+)
+
 REM Activate virtual environment if it exists
 if exist venv\Scripts\activate.bat (
     call venv\Scripts\activate.bat

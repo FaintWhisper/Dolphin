@@ -50,6 +50,13 @@ class Settings:
                     self.dampening = data.get('dampening', 1.0)  # 1x (no dampening by default)
                     self.dampening_speed = data.get('dampening_speed', 0.0)  # 0s (instant) by default
                     self.voice_mode = data.get('voice_mode', False)
+                    # Stabilizer settings
+                    self.stabilizer_enabled = data.get('stabilizer_enabled', False)
+                    self.stabilizer_window = data.get('stabilizer_window', 5.0)  # 5s time window
+                    self.stabilizer_threshold = data.get('stabilizer_threshold', 5)  # 5 changes trigger
+                    self.stabilizer_max_leeway = data.get('stabilizer_max_leeway', 12.0)  # Max leeway increase
+                    self.stabilizer_step = data.get('stabilizer_step', 1.0)  # dB step per adjustment
+                    self.stabilizer_change_threshold = data.get('stabilizer_change_threshold', 0.05)  # 5% change
             except:
                 self.set_defaults()
         else:
@@ -67,6 +74,13 @@ class Settings:
         self.dampening = 1.0      # 1x (no dampening by default)
         self.dampening_speed = 0.0  # 0s (instant) by default
         self.voice_mode = False
+        # Stabilizer settings
+        self.stabilizer_enabled = False
+        self.stabilizer_window = 5.0   # 5s time window
+        self.stabilizer_threshold = 5  # 5 changes trigger adjustment
+        self.stabilizer_max_leeway = 12.0  # Max leeway (dB)
+        self.stabilizer_step = 1.0     # dB step per adjustment
+        self.stabilizer_change_threshold = 0.05  # 5% volume change counts
     
     def save(self):
         data = {
@@ -80,7 +94,13 @@ class Settings:
             'leeway_db': self.leeway_db,
             'dampening': self.dampening,
             'dampening_speed': self.dampening_speed,
-            'voice_mode': self.voice_mode
+            'voice_mode': self.voice_mode,
+            'stabilizer_enabled': self.stabilizer_enabled,
+            'stabilizer_window': self.stabilizer_window,
+            'stabilizer_threshold': self.stabilizer_threshold,
+            'stabilizer_max_leeway': self.stabilizer_max_leeway,
+            'stabilizer_step': self.stabilizer_step,
+            'stabilizer_change_threshold': self.stabilizer_change_threshold
         }
         with open(self.settings_file, 'w') as f:
             json.dump(data, f, indent=2)
@@ -97,7 +117,7 @@ class ToggleSwitch(tk.Canvas):
         except:
             bg = '#f0f0f0'
         
-        super().__init__(parent, width=width + 250, height=height, 
+        super().__init__(parent, width=width + 340, height=max(height, 32), 
                         bg=bg, highlightthickness=0)
         
         self.width = width
@@ -139,7 +159,7 @@ class ToggleSwitch(tk.Canvas):
         
         # Draw label text
         self.create_text(self.width + 10, self.height // 2, 
-                        text=self.text, anchor=tk.W, font=('Arial', 10))
+                        text=self.text, anchor=tk.W, font=('Arial', 16))
     
     def _toggle(self, event=None):
         if self.variable:
@@ -248,6 +268,20 @@ class VolumeLimiter:
         # Voice mode - optimized for speech protection
         self.voice_mode = settings.voice_mode
         
+        # Stabilizer mode
+        self.stabilizer_enabled = settings.stabilizer_enabled
+        self.stabilizer_window = settings.stabilizer_window
+        self.stabilizer_threshold = settings.stabilizer_threshold
+        self.stabilizer_max_leeway = settings.stabilizer_max_leeway
+        self.stabilizer_step = settings.stabilizer_step
+        self.stabilizer_change_threshold = settings.stabilizer_change_threshold
+        self.base_leeway_db = settings.leeway_db  # Original leeway to restore to
+        self.current_leeway_db = settings.leeway_db  # Dynamic leeway
+        self.volume_change_times = []  # Timestamps of significant volume changes
+        self.last_set_volume = None  # Track volume changes
+        self.stabilizer_adjust_interval = 1.0  # Check every 1 second
+        self.last_stabilizer_check = 0
+        
         # Computed release rate (volume units per second)
         self._update_release_rate()
         
@@ -265,6 +299,47 @@ class VolumeLimiter:
             self.release_rate = 1.0 / self.release_time  # Full volume restore in release_time
         else:
             self.release_rate = 10.0  # Very fast
+    
+    def _track_volume_change(self, new_volume):
+        """Track significant volume changes for stabilizer"""
+        if not self.stabilizer_enabled:
+            return
+        
+        if self.last_set_volume is not None:
+            # Check if change is significant (configurable threshold)
+            change = abs(new_volume - self.last_set_volume)
+            if change > self.stabilizer_change_threshold:
+                self.volume_change_times.append(time.time())
+        
+        self.last_set_volume = new_volume
+    
+    def _update_stabilizer(self, now):
+        """Adjust leeway based on volume change frequency"""
+        # Only check periodically
+        if now - self.last_stabilizer_check < self.stabilizer_adjust_interval:
+            return
+        self.last_stabilizer_check = now
+        
+        # Remove old timestamps outside the window
+        cutoff = now - self.stabilizer_window
+        self.volume_change_times = [t for t in self.volume_change_times if t > cutoff]
+        
+        change_count = len(self.volume_change_times)
+        
+        if change_count >= self.stabilizer_threshold:
+            # Too many changes - increase leeway to reduce limiting frequency
+            new_leeway = self.current_leeway_db + self.stabilizer_step
+            new_leeway = min(new_leeway, self.stabilizer_max_leeway)
+            if new_leeway != self.current_leeway_db:
+                self.current_leeway_db = new_leeway
+                self.leeway_db = new_leeway
+        elif change_count < self.stabilizer_threshold // 2:
+            # Few changes - gradually restore to base leeway
+            if self.current_leeway_db > self.base_leeway_db:
+                new_leeway = self.current_leeway_db - (self.stabilizer_step * 0.5)
+                new_leeway = max(new_leeway, self.base_leeway_db)
+                self.current_leeway_db = new_leeway
+                self.leeway_db = new_leeway
     
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -357,6 +432,7 @@ class VolumeLimiter:
                     target_volume = target_volume / sustained_factor
                     target_volume = max(0.01, min(1.0, target_volume))
                     
+                    self._track_volume_change(target_volume)
                     self.audio.set_volume(target_volume)
             else:
                 # Audio is under threshold
@@ -374,15 +450,21 @@ class VolumeLimiter:
                             # Increase volume gradually
                             new_vol = current + self.release_rate * dt
                             new_vol = min(new_vol, target)
+                            self._track_volume_change(new_vol)
                             self.audio.set_volume(new_vol)
                         else:
                             # Reached original volume, stop limiting
+                            self._track_volume_change(target)
                             self.audio.set_volume(target)
                             self.is_limiting = False
             
             # Update UI data
             self.ui_peak = self.audio.get_raw_peak()
             self.ui_volume = self.audio.get_volume()
+            
+            # Stabilizer: adjust leeway based on volume change frequency
+            if self.stabilizer_enabled:
+                self._update_stabilizer(now)
             
             # Sleep for ~50Hz update rate
             time.sleep(0.02)
@@ -393,10 +475,16 @@ class VolumeLimiter:
         self.settings.release_time = self.release_time
         self.settings.hold_time = self.hold_time
         self.settings.user_cooldown = self.user_cooldown
-        self.settings.leeway_db = self.leeway_db
+        self.settings.leeway_db = self.base_leeway_db  # Save base leeway, not dynamic
         self.settings.dampening = self.dampening
         self.settings.dampening_speed = self.dampening_speed
         self.settings.voice_mode = self.voice_mode
+        self.settings.stabilizer_enabled = self.stabilizer_enabled
+        self.settings.stabilizer_window = self.stabilizer_window
+        self.settings.stabilizer_threshold = self.stabilizer_threshold
+        self.settings.stabilizer_max_leeway = self.stabilizer_max_leeway
+        self.settings.stabilizer_step = self.stabilizer_step
+        self.settings.stabilizer_change_threshold = self.stabilizer_change_threshold
         self.settings.save()
 
 
@@ -406,7 +494,7 @@ class TameGUI:
     def __init__(self, root, start_minimized=False):
         self.root = root
         self.root.title("Tame")
-        self.root.geometry("460x780")
+        self.root.geometry("1100x850")
         self.root.resizable(False, False)
         
         # Initialize audio and limiter
@@ -442,107 +530,204 @@ class TameGUI:
         main = ttk.Frame(self.root, padding="15")
         main.pack(fill=tk.BOTH, expand=True)
         
-        # Title
-        ttk.Label(main, text="Tame", font=('Arial', 16, 'bold')).pack(pady=(0, 10))
+        # Title and Status row
+        header_frame = ttk.Frame(main)
+        header_frame.pack(fill=tk.X, pady=(0, 12))
         
-        # Status frame
-        status_frame = ttk.Frame(main)
-        status_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(header_frame, text="Tame", font=('Arial', 28, 'bold')).pack(side=tk.LEFT)
         
-        ttk.Label(status_frame, text="Status:").pack(side=tk.LEFT)
-        self.status_label = ttk.Label(status_frame, text="Running", foreground="green")
-        self.status_label.pack(side=tk.LEFT, padx=10)
+        status_frame = ttk.Frame(header_frame)
+        status_frame.pack(side=tk.RIGHT)
+        ttk.Label(status_frame, text="Status:", font=('Arial', 16)).pack(side=tk.LEFT)
+        self.status_label = ttk.Label(status_frame, text="Running", foreground="green", font=('Arial', 16, 'bold'))
+        self.status_label.pack(side=tk.LEFT, padx=5)
         
         # === Volume Cap Slider ===
         self._create_slider(main, "Volume Cap:", 0.05, 1.0, 0.01,
                            self.limiter.volume_cap, self._on_cap_change, "%")
         
-        # === Advanced Settings Frame ===
-        adv_frame = ttk.LabelFrame(main, text="Advanced Settings", padding="10")
-        adv_frame.pack(fill=tk.X, pady=10)
+        # === Side-by-side container for Advanced Settings and Stabilizer ===
+        columns_frame = ttk.Frame(main)
+        columns_frame.pack(fill=tk.X, pady=10)
+        
+        # Left column: Advanced Settings
+        style = ttk.Style()
+        style.configure('Big.TLabelframe.Label', font=('Arial', 16))
+        adv_frame = ttk.LabelFrame(columns_frame, text="Advanced Settings", padding="10", style='Big.TLabelframe')
+        adv_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
         
         # Attack Time (1ms to 100ms)
-        self.attack_label = self._create_slider(adv_frame, "Attack:", 0.001, 0.1, 0.001,
+        self._create_slider_compact(adv_frame, "Attack:", 0.001, 0.1, 0.001,
                            self.limiter.attack_time, self._on_attack_change, "ms", 1000)
         
         # Release Time (100ms to 3s)
-        self.release_label = self._create_slider(adv_frame, "Release:", 0.1, 3.0, 0.05,
+        self._create_slider_compact(adv_frame, "Release:", 0.1, 3.0, 0.05,
                            self.limiter.release_time, self._on_release_change, "ms", 1000)
         
         # Hold Time (0 to 500ms)
-        self.hold_label = self._create_slider(adv_frame, "Hold:", 0.0, 0.5, 0.01,
+        self._create_slider_compact(adv_frame, "Hold:", 0.0, 0.5, 0.01,
                            self.limiter.hold_time, self._on_hold_change, "ms", 1000)
         
         # User Cooldown (0.5s to 5s)
-        self.cooldown_label = self._create_slider(adv_frame, "Cooldown:", 0.5, 5.0, 0.1,
+        self._create_slider_compact(adv_frame, "Cooldown:", 0.5, 5.0, 0.1,
                            self.limiter.user_cooldown, self._on_cooldown_change, "s", 1)
         
         # Leeway (0 to 12 dB)
-        self.leeway_label = self._create_slider(adv_frame, "Leeway:", 0.0, 12.0, 0.5,
+        self._create_slider_compact(adv_frame, "Leeway:", 0.0, 12.0, 0.5,
                            self.limiter.leeway_db, self._on_leeway_change, "dB", 1)
         
         # Dampening (1x to 5x)
-        self.dampening_label = self._create_slider(adv_frame, "Dampening:", 1.0, 5.0, 0.1,
+        self._create_slider_compact(adv_frame, "Dampening:", 1.0, 5.0, 0.1,
                            self.limiter.dampening, self._on_dampening_change, "x", 1)
         
         # Dampening Speed (0 to 2 seconds)
-        self.dampening_speed_label = self._create_slider(adv_frame, "Damp Speed:", 0.0, 2.0, 0.05,
+        self._create_slider_compact(adv_frame, "Damp Spd:", 0.0, 2.0, 0.05,
                            self.limiter.dampening_speed, self._on_dampening_speed_change, "s", 1)
         
+        # Right column: Stabilizer Settings
+        stab_frame = ttk.LabelFrame(columns_frame, text="Stabilizer", padding="10", style='Big.TLabelframe')
+        stab_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
+        
+        # Stabilizer enable toggle
+        self.stabilizer_var = tk.BooleanVar(value=self.limiter.stabilizer_enabled)
+        stabilizer_toggle = ToggleSwitch(
+            stab_frame, text="Enable",
+            variable=self.stabilizer_var, command=self._on_stabilizer_change,
+            width=70, height=36
+        )
+        stabilizer_toggle.pack(anchor=tk.W, pady=6)
+        
+        # Stabilizer window (1s to 30s)
+        self._create_slider_compact(stab_frame, "Window:", 1.0, 30.0, 1.0,
+                           self.limiter.stabilizer_window, self._on_stab_window_change, "s", 1)
+        
+        # Stabilizer threshold (2 to 20 changes)
+        self._create_slider_compact(stab_frame, "Count:", 2, 20, 1,
+                           self.limiter.stabilizer_threshold, self._on_stab_threshold_change, "chg", 1)
+        
+        # Stabilizer change threshold (1% to 20%)
+        self._create_slider_compact(stab_frame, "Change:", 0.01, 0.20, 0.01,
+                           self.limiter.stabilizer_change_threshold, self._on_stab_change_threshold, "%", 100)
+        
+        # Stabilizer max leeway (base to 20 dB)
+        self._create_slider_compact(stab_frame, "Max:", 3.0, 20.0, 0.5,
+                           self.limiter.stabilizer_max_leeway, self._on_stab_max_leeway_change, "dB", 1)
+        
+        # Stabilizer step (0.5 to 3 dB per adjustment)
+        self._create_slider_compact(stab_frame, "Step:", 0.5, 3.0, 0.25,
+                           self.limiter.stabilizer_step, self._on_stab_step_change, "dB", 1)
+        
+        # Current dynamic leeway display
+        stab_status_frame = ttk.Frame(stab_frame)
+        stab_status_frame.pack(fill=tk.X, pady=6)
+        ttk.Label(stab_status_frame, text="Current:", font=('Arial', 15)).pack(side=tk.LEFT)
+        self.dynamic_leeway_label = ttk.Label(stab_status_frame, text=f"{self.limiter.current_leeway_db:.1f}dB", foreground="blue", font=('Arial', 15, 'bold'))
+        self.dynamic_leeway_label.pack(side=tk.LEFT, padx=5)
+
         # Audio level display
         levels_frame = ttk.Frame(main)
         levels_frame.pack(fill=tk.X, pady=10)
         
-        ttk.Label(levels_frame, text="Audio Level:").grid(row=0, column=0, sticky=tk.W, pady=2)
-        self.peak_label = ttk.Label(levels_frame, text="0%", width=8)
-        self.peak_label.grid(row=0, column=1, sticky=tk.W, pady=2)
+        ttk.Label(levels_frame, text="Audio Level:", font=('Arial', 16)).pack(side=tk.LEFT)
+        self.peak_label = ttk.Label(levels_frame, text="0%", width=6, font=('Arial', 16, 'bold'))
+        self.peak_label.pack(side=tk.LEFT, padx=(8, 40))
         
-        ttk.Label(levels_frame, text="System Vol:").grid(row=1, column=0, sticky=tk.W, pady=2)
-        self.vol_label = ttk.Label(levels_frame, text="0%", width=8)
-        self.vol_label.grid(row=1, column=1, sticky=tk.W, pady=2)
+        ttk.Label(levels_frame, text="System Vol:", font=('Arial', 16)).pack(side=tk.LEFT)
+        self.vol_label = ttk.Label(levels_frame, text="0%", width=6, font=('Arial', 16, 'bold'))
+        self.vol_label.pack(side=tk.LEFT, padx=8)
         
-        # Audio level graph
+        # Audio level graph - larger now
         graph_frame = ttk.Frame(main)
-        graph_frame.pack(fill=tk.X, pady=5)
+        graph_frame.pack(fill=tk.BOTH, expand=True, pady=10)
         
-        self.graph_canvas = tk.Canvas(graph_frame, width=380, height=50, bg='#1a1a1a', 
+        self.graph_canvas = tk.Canvas(graph_frame, width=1050, height=140, bg='#1a1a1a', 
                                       highlightthickness=1, highlightbackground='#333')
-        self.graph_canvas.pack()
+        self.graph_canvas.pack(fill=tk.BOTH, expand=True)
         
-        # Bottom buttons frame
-        btn_frame = ttk.Frame(main)
-        btn_frame.pack(fill=tk.X, pady=10)
+        # Bottom buttons and toggles frame
+        bottom_frame = ttk.Frame(main)
+        bottom_frame.pack(fill=tk.X, pady=5)
         
-        # Toggle button
+        # Left side: buttons
+        btn_frame = ttk.Frame(bottom_frame)
+        btn_frame.pack(side=tk.LEFT)
+        
         self.toggle_btn = ttk.Button(btn_frame, text="Disable", command=self._toggle)
         self.toggle_btn.pack(side=tk.LEFT, padx=5)
         
-        # Reset to defaults button
         reset_btn = ttk.Button(btn_frame, text="Reset Defaults", command=self._reset_defaults)
-        reset_btn.pack(side=tk.RIGHT, padx=5)
+        reset_btn.pack(side=tk.LEFT, padx=5)
         
-        # Startup toggle
+        # Right side: toggles
+        toggles_frame = ttk.Frame(bottom_frame)
+        toggles_frame.pack(side=tk.RIGHT)
+        
         self.startup_var = tk.BooleanVar(value=self.settings.run_at_startup)
         startup_toggle = ToggleSwitch(
-            main, text="Run at Windows startup",
-            variable=self.startup_var, command=self._on_startup_change
+            toggles_frame, text="Run at startup",
+            variable=self.startup_var, command=self._on_startup_change,
+            width=70, height=36
         )
-        startup_toggle.pack(anchor=tk.W, pady=5)
+        startup_toggle.pack(side=tk.LEFT, padx=12)
         
-        # Minimize to tray toggle
         self.minimize_var = tk.BooleanVar(value=self.settings.show_close_notifications)
         minimize_toggle = ToggleSwitch(
-            main, text="Minimize to tray on close",
-            variable=self.minimize_var, command=self._on_minimize_change
+            toggles_frame, text="Minimize to tray",
+            variable=self.minimize_var, command=self._on_minimize_change,
+            width=70, height=36
         )
-        minimize_toggle.pack(anchor=tk.W, pady=5)
+        minimize_toggle.pack(side=tk.LEFT, padx=12)
+    
+    def _create_slider_compact(self, parent, label_text, from_, to, resolution, initial, callback, unit, multiplier=100):
+        """Create a compact labeled slider with value display"""
+        frame = ttk.Frame(parent)
+        frame.pack(fill=tk.X, pady=3)
+        
+        ttk.Label(frame, text=label_text, width=9, font=('Arial', 15)).pack(side=tk.LEFT)
+        
+        # Format value based on unit
+        val_text = self._format_value(initial, unit, multiplier)
+        
+        val_label = ttk.Label(frame, text=val_text, width=7, font=('Arial', 15))
+        val_label.pack(side=tk.RIGHT)
+        
+        var = tk.DoubleVar(value=initial)
+        slider = tk.Scale(
+            frame, from_=from_, to=to,
+            variable=var, orient=tk.HORIZONTAL,
+            resolution=resolution, showvalue=False, length=170,
+            command=lambda v, cb=callback, lbl=val_label, u=unit, m=multiplier: 
+                self._slider_callback(v, cb, lbl, u, m)
+        )
+        slider.pack(side=tk.RIGHT, padx=3)
+        
+        # Store reference for resetting
+        setattr(self, f"slider_{label_text.replace(':', '').replace(' ', '_').lower()}", 
+                (slider, var, val_label, unit, multiplier))
+        
+        return val_label
+    
+    def _format_value(self, v, unit, multiplier):
+        """Format a value based on unit type"""
+        if unit == "%":
+            return f"{int(v * multiplier)}%"
+        elif unit == "ms":
+            return f"{int(v * multiplier)}ms"
+        elif unit == "dB":
+            return f"{v:.1f}dB"
+        elif unit == "x":
+            return f"{v:.1f}x"
+        elif unit == "chg":
+            return f"{int(v)}"
+        else:
+            return f"{v:.1f}s"
     
     def _create_slider(self, parent, label_text, from_, to, resolution, initial, callback, unit, multiplier=100):
         """Create a labeled slider with value display"""
         frame = ttk.Frame(parent)
-        frame.pack(fill=tk.X, pady=3)
+        frame.pack(fill=tk.X, pady=6)
         
-        ttk.Label(frame, text=label_text, width=10).pack(side=tk.LEFT)
+        ttk.Label(frame, text=label_text, width=12, font=('Arial', 16)).pack(side=tk.LEFT)
         
         # Format value based on unit
         if unit == "%":
@@ -553,21 +738,23 @@ class TameGUI:
             val_text = f"{initial:.1f}dB"
         elif unit == "x":
             val_text = f"{initial:.1f}x"
+        elif unit == "chg":
+            val_text = f"{int(initial)} chg"
         else:
             val_text = f"{initial:.1f}s"
         
-        val_label = ttk.Label(frame, text=val_text, width=8)
+        val_label = ttk.Label(frame, text=val_text, width=8, font=('Arial', 16))
         val_label.pack(side=tk.RIGHT)
         
         var = tk.DoubleVar(value=initial)
         slider = tk.Scale(
             frame, from_=from_, to=to,
             variable=var, orient=tk.HORIZONTAL,
-            resolution=resolution, showvalue=False, length=200,
+            resolution=resolution, showvalue=False, length=320,
             command=lambda v, cb=callback, lbl=val_label, u=unit, m=multiplier: 
                 self._slider_callback(v, cb, lbl, u, m)
         )
-        slider.pack(side=tk.RIGHT, padx=5)
+        slider.pack(side=tk.RIGHT, padx=8)
         
         # Store reference for resetting
         setattr(self, f"slider_{label_text.replace(':', '').replace(' ', '_').lower()}", 
@@ -587,6 +774,8 @@ class TameGUI:
             label.config(text=f"{v:.1f}dB")
         elif unit == "x":
             label.config(text=f"{v:.1f}x")
+        elif unit == "chg":
+            label.config(text=f"{int(v)} chg")
         else:
             label.config(text=f"{v:.1f}s")
     
@@ -608,12 +797,38 @@ class TameGUI:
     
     def _on_leeway_change(self, val):
         self.limiter.leeway_db = float(val)
+        self.limiter.base_leeway_db = float(val)  # Update base for stabilizer
+        self.limiter.current_leeway_db = float(val)  # Reset current
     
     def _on_dampening_change(self, val):
         self.limiter.dampening = float(val)
     
     def _on_dampening_speed_change(self, val):
         self.limiter.dampening_speed = float(val)
+    
+    def _on_stabilizer_change(self):
+        enabled = self.stabilizer_var.get()
+        self.limiter.stabilizer_enabled = enabled
+        # Reset dynamic leeway to base when disabled
+        if not enabled:
+            self.limiter.current_leeway_db = self.limiter.base_leeway_db
+            self.limiter.leeway_db = self.limiter.base_leeway_db
+            self.limiter.volume_change_times.clear()
+    
+    def _on_stab_window_change(self, val):
+        self.limiter.stabilizer_window = float(val)
+    
+    def _on_stab_threshold_change(self, val):
+        self.limiter.stabilizer_threshold = int(float(val))
+    
+    def _on_stab_max_leeway_change(self, val):
+        self.limiter.stabilizer_max_leeway = float(val)
+    
+    def _on_stab_step_change(self, val):
+        self.limiter.stabilizer_step = float(val)
+    
+    def _on_stab_change_threshold(self, val):
+        self.limiter.stabilizer_change_threshold = float(val)
     
     def _update_slider_displays(self):
         """Update all slider positions and labels to match current limiter values"""
@@ -639,6 +854,8 @@ class TameGUI:
                     label.config(text=f"{value:.1f}dB")
                 elif unit == "x":
                     label.config(text=f"{value:.1f}x")
+                elif unit == "chg":
+                    label.config(text=f"{int(value)} chg")
                 else:
                     label.config(text=f"{value:.1f}s")
     
@@ -649,9 +866,21 @@ class TameGUI:
         self.limiter.hold_time = 0.15
         self.limiter.user_cooldown = 2.0
         self.limiter.leeway_db = 3.0     # 3dB leeway
+        self.limiter.base_leeway_db = 3.0
+        self.limiter.current_leeway_db = 3.0
         self.limiter.dampening = 2.0     # 2x max dampening
         self.limiter.dampening_speed = 0.1  # 100ms to reach max
         self.limiter._update_release_rate()
+        
+        # Reset stabilizer
+        self.limiter.stabilizer_enabled = False
+        self.limiter.stabilizer_window = 5.0
+        self.limiter.stabilizer_threshold = 5
+        self.limiter.stabilizer_max_leeway = 12.0
+        self.limiter.stabilizer_step = 1.0
+        self.limiter.stabilizer_change_threshold = 0.05
+        self.limiter.volume_change_times.clear()
+        self.stabilizer_var.set(False)
         
         self._update_slider_displays()
     
@@ -709,6 +938,14 @@ class TameGUI:
             self.peak_label.config(text=f"{peak_pct}%")
             self.vol_label.config(text=f"{vol_pct}%")
             
+            # Update dynamic leeway display for stabilizer
+            current_leeway = self.limiter.current_leeway_db
+            base_leeway = self.limiter.base_leeway_db
+            if current_leeway > base_leeway:
+                self.dynamic_leeway_label.config(text=f"{current_leeway:.1f}dB (+{current_leeway - base_leeway:.1f})", foreground="orange")
+            else:
+                self.dynamic_leeway_label.config(text=f"{current_leeway:.1f}dB", foreground="blue")
+            
             # Update graph with raw peak level
             self.peak_history.pop(0)
             self.peak_history.append(peak)
@@ -723,8 +960,13 @@ class TameGUI:
         canvas = self.graph_canvas
         canvas.delete("all")
         
-        w = 340
-        h = 50
+        # Get actual canvas size
+        w = canvas.winfo_width()
+        h = canvas.winfo_height()
+        if w < 10 or h < 10:  # Canvas not yet realized
+            w = 650
+            h = 100
+        
         num_points = len(self.peak_history)
         
         # Draw threshold line - this is where limiting kicks in
