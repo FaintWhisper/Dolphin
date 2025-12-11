@@ -1,0 +1,18 @@
+#!/bin/bash
+# Pre-push hook: Verify the build works before pushing
+
+echo "[INFO] Building Dolphin executable..."
+python -m PyInstaller --clean Dolphin.spec
+
+if [ $? -ne 0 ]; then
+    echo "[ERROR] Build failed! Push cancelled."
+    exit 1
+fi
+
+if [ ! -f "dist/Dolphin.exe" ]; then
+    echo "[ERROR] Dolphin.exe not found after build! Push cancelled."
+    exit 1
+fi
+
+echo "[INFO] Build successful! Proceeding with push..."
+exit 0

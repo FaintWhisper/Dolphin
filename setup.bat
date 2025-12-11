@@ -22,9 +22,15 @@ pip install --upgrade pip
 pip install -r requirements.txt
 
 echo.
+echo Configuring git hooks...
+git config core.hooksPath .githooks
+
+echo.
 echo Setup complete!
 echo.
 echo To run the app: python dolphin.py
 echo To build exe: build.bat
+echo.
+echo Git hooks configured - build will run automatically before push
 echo.
 pause
