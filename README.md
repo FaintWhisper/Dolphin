@@ -27,8 +27,11 @@ Download `Dolphin.exe` from the [Releases](https://github.com/FaintWhisper/Dolph
 git clone https://github.com/FaintWhisper/Dolphin.git
 cd Dolphin
 
-# Install dependencies
-pip install -r requirements.txt
+# Run setup (creates venv, installs dependencies, configures git hooks)
+setup.bat
+
+# Activate virtual environment
+venv\Scripts\activate.bat
 
 # Run directly
 python dolphin.py
@@ -56,6 +59,7 @@ build.bat
 | Setting | Description | Default |
 |---------|-------------|---------|
 | Volume Cap | Maximum allowed output level (0-100%) | 20% |
+| Dark Mode | Enable dark theme (light theme available) | On |
 | Run at Windows startup | Auto-start Dolphin when Windows boots | Off |
 | Minimize to tray on close | Hide to tray instead of exiting | On |
 
@@ -70,6 +74,24 @@ build.bat
 | Leeway | Soft-knee range above threshold (dB) | 3.0dB | 0-12dB |
 | Dampening | Maximum reduction multiplier for sustained peaks | 1.0x | 1.0-3.0x |
 | Dampening Speed | Time to reach maximum dampening | 0.0s | 0-5s |
+
+### Stabilizer Mode
+
+The Stabilizer automatically adjusts the leeway (soft-knee) based on how frequently the audio limiter is triggering:
+
+| Parameter | Description | Default | Range |
+|-----------|-------------|---------|-------|
+| Enable | Toggle stabilizer on/off | Off | - |
+| Window | Time window to track volume changes (seconds) | 5.0s | 1-30s |
+| Count | Number of limiting triggers to increase leeway | 5 | 2-20 |
+| Change | Minimum volume change to count as a trigger (%) | 5% | 1-20% |
+| Max | Maximum leeway the stabilizer can reach (dB) | 12.0dB | 3-20dB |
+| Step | dB increase/decrease per adjustment | 1.0dB | 0.5-3.0dB |
+
+**How it works:**
+- If audio exceeds the threshold frequently (5+ times in 5s), the stabilizer increases leeway to reduce excessive limiting
+- When triggers decrease, leeway gradually returns to its base value
+- Useful for content with dynamic peaks (music, podcasts, gaming)
 
 ### How the Limiter Works
 
@@ -89,7 +111,10 @@ The limiter respects manual volume changes by pausing automatic control for the 
 - **Audio Interface**: Windows Core Audio API (WASAPI) via `pycaw`
   - `IAudioEndpointVolume` for system volume control
   - `IAudioMeterInformation` for real-time peak metering
-- **GUI Framework**: tkinter with custom toggle switch widgets
+- **GUI Framework**: tkinter with custom toggle switch widgets and theme support
+  - Dark mode: #1e1e1e background with light text (default)
+  - Light mode: #f5f5f5 background with dark text
+  - Real-time theme switching with persistent preferences
 - **System Tray**: `pystray` with PIL for icon generation
 - **Packaging**: PyInstaller single-file executable
 
@@ -108,13 +133,19 @@ pyinstaller>=6.0.0   # Executable packaging (build only)
 
 ```
 Dolphin/
-├── dolphin.py        # Main application
-├── Dolphin.spec      # PyInstaller configuration
-├── build.bat         # Build script
-├── setup.bat         # Development environment setup
-├── requirements.txt  # Python dependencies
+├── dolphin.py              # Main application with GUI, audio control, and limiter
+├── Dolphin.spec            # PyInstaller configuration
+├── build.bat               # Build script (builds Dolphin.exe)
+├── setup.bat               # Development environment setup & git hooks config
+├── requirements.txt        # Python dependencies
+├── test_components.py      # Component verification script
+├── .github/
+│   └── workflows/
+│       └── release.yml     # GitHub Actions: auto-build and release on tags
+├── .githooks/
+│   └── pre-push            # Git hook: verify build before push
 └── dist/
-    └── Dolphin.exe   # Built executable
+    └── Dolphin.exe         # Built executable
 ```
 
 ## Acknowledgments
