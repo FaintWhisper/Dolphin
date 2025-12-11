@@ -1,4 +1,4 @@
-# Tame
+# Dolphin
 
 A Windows audio volume limiter that automatically reduces system volume when audio exceeds a configurable threshold, protecting against sudden loud sounds.
 
@@ -8,28 +8,30 @@ A Windows audio volume limiter that automatically reduces system volume when aud
 - Real-time audio peak monitoring via Windows Audio Session API (WASAPI)
 - Compressor-style attack/release/hold timing controls
 - Soft-knee limiting with adjustable leeway (dB)
+- Stabilizer mode for dynamic leeway adjustment
+- Dark/Light mode toggle
 - System tray integration with minimize-to-tray support
 - Windows startup integration (starts minimized when enabled)
-- Persistent settings stored in `%APPDATA%\tame\settings.json`
+- Persistent settings stored in `%APPDATA%\dolphin\settings.json`
 
 ## Installation
 
 ### Pre-built Executable
 
-Download `Tame.exe` from the [Releases](https://github.com/FaintWhisper/Tame/releases) page.
+Download `Dolphin.exe` from the [Releases](https://github.com/FaintWhisper/Dolphin/releases) page.
 
 ### Build from Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/FaintWhisper/Tame.git
-cd Tame
+git clone https://github.com/FaintWhisper/Dolphin.git
+cd Dolphin
 
 # Install dependencies
 pip install -r requirements.txt
 
 # Run directly
-python tame.py
+python dolphin.py
 
 # Build standalone executable
 build.bat
@@ -42,7 +44,7 @@ build.bat
 
 ## Usage
 
-1. Launch `Tame.exe` or run `python tame.py`
+1. Launch `Dolphin.exe` or run `python dolphin.py`
 2. Adjust the **Volume Cap** slider to set your maximum output level (default: 20%)
 3. The limiter monitors audio in real-time and reduces volume when peaks exceed the threshold
 4. Close the window to minimize to system tray (configurable)
@@ -54,7 +56,7 @@ build.bat
 | Setting | Description | Default |
 |---------|-------------|---------|
 | Volume Cap | Maximum allowed output level (0-100%) | 20% |
-| Run at Windows startup | Auto-start Tame when Windows boots | Off |
+| Run at Windows startup | Auto-start Dolphin when Windows boots | Off |
 | Minimize to tray on close | Hide to tray instead of exiting | On |
 
 ### Advanced Limiter Settings
@@ -105,14 +107,14 @@ pyinstaller>=6.0.0   # Executable packaging (build only)
 ### File Structure
 
 ```
-Tame/
-├── tame.py           # Main application
-├── Tame.spec         # PyInstaller configuration
+Dolphin/
+├── dolphin.py        # Main application
+├── Dolphin.spec      # PyInstaller configuration
 ├── build.bat         # Build script
 ├── setup.bat         # Development environment setup
 ├── requirements.txt  # Python dependencies
 └── dist/
-    └── Tame.exe      # Built executable
+    └── Dolphin.exe   # Built executable
 ```
 
 ## Acknowledgments

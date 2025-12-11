@@ -1,5 +1,5 @@
 @echo off
-echo Setting up Tame development environment...
+echo Setting up Dolphin development environment...
 echo.
 
 REM Check if Python is installed
@@ -24,7 +24,7 @@ pip install -r requirements.txt
 echo.
 echo Setup complete!
 echo.
-echo To run the app: python tame.py
+echo To run the app: python dolphin.py
 echo To build exe: build.bat
 echo.
 pause

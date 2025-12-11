@@ -1,5 +1,5 @@
 """
-Quick test script to verify Tame components work
+Quick test script to verify Dolphin components work
 """
 import sys
 print("Testing imports...")
@@ -45,5 +45,5 @@ try:
 except Exception as e:
     print(f"✗ Volume control: {e}")
 
-print("\n✅ All components working! Tame should run successfully.")
+print("\n✅ All components working! Dolphin should run successfully.")
 input("Press Enter to exit...")

@@ -1,5 +1,5 @@
 """
-Tame - Audio Volume Limiter
+Dolphin - Audio Volume Limiter
 Automatically reduces system volume when audio gets too loud to protect your ears.
 """
 
@@ -28,7 +28,7 @@ class Settings:
     """User settings management"""
     
     def __init__(self):
-        self.app_data = Path(os.getenv('APPDATA')) / 'tame'
+        self.app_data = Path(os.getenv('APPDATA')) / 'dolphin'
         self.app_data.mkdir(exist_ok=True)
         self.settings_file = self.app_data / 'settings.json'
         self.load()
@@ -57,6 +57,7 @@ class Settings:
                     self.stabilizer_max_leeway = data.get('stabilizer_max_leeway', 12.0)  # Max leeway increase
                     self.stabilizer_step = data.get('stabilizer_step', 1.0)  # dB step per adjustment
                     self.stabilizer_change_threshold = data.get('stabilizer_change_threshold', 0.05)  # 5% change
+                    self.dark_mode = data.get('dark_mode', True)  # Dark mode by default
             except:
                 self.set_defaults()
         else:
@@ -81,6 +82,7 @@ class Settings:
         self.stabilizer_max_leeway = 12.0  # Max leeway (dB)
         self.stabilizer_step = 1.0     # dB step per adjustment
         self.stabilizer_change_threshold = 0.05  # 5% volume change counts
+        self.dark_mode = True  # Dark mode by default
     
     def save(self):
         data = {
@@ -100,7 +102,8 @@ class Settings:
             'stabilizer_threshold': self.stabilizer_threshold,
             'stabilizer_max_leeway': self.stabilizer_max_leeway,
             'stabilizer_step': self.stabilizer_step,
-            'stabilizer_change_threshold': self.stabilizer_change_threshold
+            'stabilizer_change_threshold': self.stabilizer_change_threshold,
+            'dark_mode': self.dark_mode
         }
         with open(self.settings_file, 'w') as f:
             json.dump(data, f, indent=2)
@@ -110,20 +113,15 @@ class ToggleSwitch(tk.Canvas):
     """Custom toggle switch widget"""
     
     def __init__(self, parent, variable=None, command=None, text="", 
-                 width=50, height=26, on_color="#4CAF50", off_color="#ccc"):
-        # Try to get parent bg, fallback to system color
-        try:
-            bg = parent.cget('background')
-        except:
-            bg = '#f0f0f0'
-        
-        super().__init__(parent, width=width + 340, height=max(height, 32), 
+                 width=50, height=26, on_color="#4ade80", off_color="#505050", bg="#1e1e1e", fg="#ffffff"):
+        super().__init__(parent, width=width + 180, height=max(height, 32), 
                         bg=bg, highlightthickness=0)
         
         self.width = width
         self.height = height
         self.on_color = on_color
         self.off_color = off_color
+        self.fg_color = fg
         self.variable = variable
         self.command = command
         self.text = text
@@ -159,7 +157,7 @@ class ToggleSwitch(tk.Canvas):
         
         # Draw label text
         self.create_text(self.width + 10, self.height // 2, 
-                        text=self.text, anchor=tk.W, font=('Arial', 16))
+                        text=self.text, anchor=tk.W, font=('Arial', 16), fill=self.fg_color)
     
     def _toggle(self, event=None):
         if self.variable:
@@ -488,19 +486,47 @@ class VolumeLimiter:
         self.settings.save()
 
 
-class TameGUI:
+class DolphinGUI:
     """Lightweight GUI"""
+    
+    # Dark mode color scheme
+    DARK_BG = '#1e1e1e'
+    DARK_FG = '#ffffff'
+    DARK_ACCENT = '#3d3d3d'
+    DARK_SLIDER_BG = '#2d2d2d'
+    DARK_SLIDER_FG = '#4a9eff'
+    DARK_TROUGH = '#404040'
+    DARK_GRAPH_BG = '#1a1a1a'
+    
+    # Light mode color scheme
+    LIGHT_BG = '#f5f5f5'
+    LIGHT_FG = '#1a1a1a'
+    LIGHT_ACCENT = '#e0e0e0'
+    LIGHT_SLIDER_BG = '#ffffff'
+    LIGHT_SLIDER_FG = '#2196f3'
+    LIGHT_TROUGH = '#cccccc'
+    LIGHT_GRAPH_BG = '#ffffff'
     
     def __init__(self, root, start_minimized=False):
         self.root = root
-        self.root.title("Tame")
-        self.root.geometry("1100x850")
+        self.root.title("Dolphin")
+        self.root.geometry("1200x850")
         self.root.resizable(False, False)
         
-        # Initialize audio and limiter
+        # Initialize audio and limiter first (needed for dark_mode setting)
         self.settings = Settings()
         self.audio = AudioController()
         self.limiter = VolumeLimiter(self.settings, self.audio)
+        
+        # Track dark mode state
+        self.is_dark_mode = self.settings.dark_mode
+        
+        # Store slider and toggle references for theme updates
+        self.all_sliders = []
+        self.all_toggles = []
+        
+        # Apply theme
+        self._apply_theme()
         
         # Audio history for graph
         self.peak_history = [0.0] * 100
@@ -526,6 +552,79 @@ class TameGUI:
         # Start UI updates (slower rate)
         self._schedule_ui_update()
     
+    def _apply_theme(self):
+        """Apply dark or light theme based on is_dark_mode"""
+        if self.is_dark_mode:
+            bg = self.DARK_BG
+            fg = self.DARK_FG
+            accent = self.DARK_ACCENT
+            trough = self.DARK_TROUGH
+            slider_fg = self.DARK_SLIDER_FG
+            graph_bg = self.DARK_GRAPH_BG
+            toggle_off = '#505050'
+            toggle_label = '#ffffff'
+        else:
+            bg = self.LIGHT_BG
+            fg = self.LIGHT_FG
+            accent = self.LIGHT_ACCENT
+            trough = self.LIGHT_TROUGH
+            slider_fg = self.LIGHT_SLIDER_FG
+            graph_bg = self.LIGHT_GRAPH_BG
+            toggle_off = '#cccccc'
+            toggle_label = '#1a1a1a'
+        
+        # Store current theme colors for use by other methods
+        self.theme_bg = bg
+        self.theme_fg = fg
+        self.theme_accent = accent
+        self.theme_trough = trough
+        self.theme_slider_fg = slider_fg
+        self.theme_graph_bg = graph_bg
+        self.theme_toggle_off = toggle_off
+        self.theme_toggle_label = toggle_label
+        
+        self.root.configure(bg=bg)
+        
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        style.configure('.', background=bg, foreground=fg, fieldbackground=accent, troughcolor=trough)
+        style.configure('TFrame', background=bg)
+        style.configure('TLabel', background=bg, foreground=fg)
+        style.configure('TLabelframe', background=bg, foreground=fg)
+        style.configure('TLabelframe.Label', background=bg, foreground=fg)
+        style.configure('Big.TLabelframe', background=bg, foreground=fg)
+        style.configure('Big.TLabelframe.Label', font=('Arial', 16), background=bg, foreground=fg)
+        style.configure('TButton', background=accent, foreground=fg)
+        style.map('TButton', background=[('active', '#505050' if self.is_dark_mode else '#d0d0d0')])
+    
+    def _toggle_dark_mode(self):
+        """Toggle between dark and light mode"""
+        self.is_dark_mode = not self.is_dark_mode
+        self.settings.dark_mode = self.is_dark_mode
+        self.settings.save()
+        self._apply_theme()
+        
+        # Update graph canvas background
+        if hasattr(self, 'graph_canvas'):
+            self.graph_canvas.configure(bg=self.theme_graph_bg)
+        
+        # Update all sliders with new theme colors
+        for slider in self.all_sliders:
+            slider.configure(
+                bg=self.theme_bg, fg=self.theme_fg,
+                troughcolor=self.theme_trough, activebackground=self.theme_slider_fg
+            )
+        
+        # Update all toggles with new theme colors
+        for toggle in self.all_toggles:
+            toggle.configure(bg=self.theme_bg)
+            toggle.off_color = self.theme_toggle_off
+            toggle.fg_color = self.theme_fg
+            toggle._draw()
+        
+        self._draw_graph()
+    
     def _create_widgets(self):
         main = ttk.Frame(self.root, padding="15")
         main.pack(fill=tk.BOTH, expand=True)
@@ -534,12 +633,12 @@ class TameGUI:
         header_frame = ttk.Frame(main)
         header_frame.pack(fill=tk.X, pady=(0, 12))
         
-        ttk.Label(header_frame, text="Tame", font=('Arial', 28, 'bold')).pack(side=tk.LEFT)
+        ttk.Label(header_frame, text="Dolphin", font=('Arial', 28, 'bold')).pack(side=tk.LEFT)
         
         status_frame = ttk.Frame(header_frame)
         status_frame.pack(side=tk.RIGHT)
         ttk.Label(status_frame, text="Status:", font=('Arial', 16)).pack(side=tk.LEFT)
-        self.status_label = ttk.Label(status_frame, text="Running", foreground="green", font=('Arial', 16, 'bold'))
+        self.status_label = ttk.Label(status_frame, text="Running", foreground="#4ade80", font=('Arial', 16, 'bold'))
         self.status_label.pack(side=tk.LEFT, padx=5)
         
         # === Volume Cap Slider ===
@@ -551,8 +650,6 @@ class TameGUI:
         columns_frame.pack(fill=tk.X, pady=10)
         
         # Left column: Advanced Settings
-        style = ttk.Style()
-        style.configure('Big.TLabelframe.Label', font=('Arial', 16))
         adv_frame = ttk.LabelFrame(columns_frame, text="Advanced Settings", padding="10", style='Big.TLabelframe')
         adv_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
         
@@ -593,9 +690,11 @@ class TameGUI:
         stabilizer_toggle = ToggleSwitch(
             stab_frame, text="Enable",
             variable=self.stabilizer_var, command=self._on_stabilizer_change,
-            width=70, height=36
+            width=55, height=28,
+            bg=self.theme_bg, off_color=self.theme_toggle_off, fg=self.theme_fg
         )
         stabilizer_toggle.pack(anchor=tk.W, pady=6)
+        self.all_toggles.append(stabilizer_toggle)
         
         # Stabilizer window (1s to 30s)
         self._create_slider_compact(stab_frame, "Window:", 1.0, 30.0, 1.0,
@@ -621,7 +720,7 @@ class TameGUI:
         stab_status_frame = ttk.Frame(stab_frame)
         stab_status_frame.pack(fill=tk.X, pady=6)
         ttk.Label(stab_status_frame, text="Current:", font=('Arial', 15)).pack(side=tk.LEFT)
-        self.dynamic_leeway_label = ttk.Label(stab_status_frame, text=f"{self.limiter.current_leeway_db:.1f}dB", foreground="blue", font=('Arial', 15, 'bold'))
+        self.dynamic_leeway_label = ttk.Label(stab_status_frame, text=f"{self.limiter.current_leeway_db:.1f}dB", foreground="#4a9eff", font=('Arial', 15, 'bold'))
         self.dynamic_leeway_label.pack(side=tk.LEFT, padx=5)
 
         # Audio level display
@@ -640,7 +739,7 @@ class TameGUI:
         graph_frame = ttk.Frame(main)
         graph_frame.pack(fill=tk.BOTH, expand=True, pady=10)
         
-        self.graph_canvas = tk.Canvas(graph_frame, width=1050, height=140, bg='#1a1a1a', 
+        self.graph_canvas = tk.Canvas(graph_frame, width=1050, height=140, bg=self.theme_graph_bg, 
                                       highlightthickness=1, highlightbackground='#333')
         self.graph_canvas.pack(fill=tk.BOTH, expand=True)
         
@@ -658,25 +757,36 @@ class TameGUI:
         reset_btn = ttk.Button(btn_frame, text="Reset Defaults", command=self._reset_defaults)
         reset_btn.pack(side=tk.LEFT, padx=5)
         
-        # Right side: toggles
-        toggles_frame = ttk.Frame(bottom_frame)
-        toggles_frame.pack(side=tk.RIGHT)
+        # All toggles in a single frame, packed left together
+        self.dark_mode_var = tk.BooleanVar(value=self.is_dark_mode)
+        dark_mode_toggle = ToggleSwitch(
+            btn_frame, text="Dark Mode",
+            variable=self.dark_mode_var, command=self._toggle_dark_mode,
+            width=55, height=28,
+            bg=self.theme_bg, off_color=self.theme_toggle_off, fg=self.theme_fg
+        )
+        dark_mode_toggle.pack(side=tk.LEFT, padx=30)
+        self.all_toggles.append(dark_mode_toggle)
         
         self.startup_var = tk.BooleanVar(value=self.settings.run_at_startup)
         startup_toggle = ToggleSwitch(
-            toggles_frame, text="Run at startup",
+            btn_frame, text="Run at startup",
             variable=self.startup_var, command=self._on_startup_change,
-            width=70, height=36
+            width=55, height=28,
+            bg=self.theme_bg, off_color=self.theme_toggle_off, fg=self.theme_fg
         )
-        startup_toggle.pack(side=tk.LEFT, padx=12)
+        startup_toggle.pack(side=tk.LEFT, padx=0)
+        self.all_toggles.append(startup_toggle)
         
         self.minimize_var = tk.BooleanVar(value=self.settings.show_close_notifications)
         minimize_toggle = ToggleSwitch(
-            toggles_frame, text="Minimize to tray",
+            btn_frame, text="Minimize to tray",
             variable=self.minimize_var, command=self._on_minimize_change,
-            width=70, height=36
+            width=55, height=28,
+            bg=self.theme_bg, off_color=self.theme_toggle_off, fg=self.theme_fg
         )
-        minimize_toggle.pack(side=tk.LEFT, padx=12)
+        minimize_toggle.pack(side=tk.LEFT, padx=30)
+        self.all_toggles.append(minimize_toggle)
     
     def _create_slider_compact(self, parent, label_text, from_, to, resolution, initial, callback, unit, multiplier=100):
         """Create a compact labeled slider with value display"""
@@ -696,10 +806,17 @@ class TameGUI:
             frame, from_=from_, to=to,
             variable=var, orient=tk.HORIZONTAL,
             resolution=resolution, showvalue=False, length=170,
+            sliderlength=30, width=22,
+            bg=self.theme_bg, fg=self.theme_fg,
+            troughcolor=self.theme_trough, activebackground=self.theme_slider_fg,
+            highlightthickness=0,
             command=lambda v, cb=callback, lbl=val_label, u=unit, m=multiplier: 
                 self._slider_callback(v, cb, lbl, u, m)
         )
         slider.pack(side=tk.RIGHT, padx=3)
+        
+        # Store reference for theme updates
+        self.all_sliders.append(slider)
         
         # Store reference for resetting
         setattr(self, f"slider_{label_text.replace(':', '').replace(' ', '_').lower()}", 
@@ -751,10 +868,17 @@ class TameGUI:
             frame, from_=from_, to=to,
             variable=var, orient=tk.HORIZONTAL,
             resolution=resolution, showvalue=False, length=320,
+            sliderlength=36, width=26,
+            bg=self.theme_bg, fg=self.theme_fg,
+            troughcolor=self.theme_trough, activebackground=self.theme_slider_fg,
+            highlightthickness=0,
             command=lambda v, cb=callback, lbl=val_label, u=unit, m=multiplier: 
                 self._slider_callback(v, cb, lbl, u, m)
         )
         slider.pack(side=tk.RIGHT, padx=8)
+        
+        # Store reference for theme updates
+        self.all_sliders.append(slider)
         
         # Store reference for resetting
         setattr(self, f"slider_{label_text.replace(':', '').replace(' ', '_').lower()}", 
@@ -908,10 +1032,10 @@ class TameGUI:
                 exe_path = sys.executable
                 if self.settings.show_close_notifications:
                     exe_path = f'"{exe_path}" --minimized'
-                winreg.SetValueEx(key, "Tame", 0, winreg.REG_SZ, exe_path)
+                winreg.SetValueEx(key, "Dolphin", 0, winreg.REG_SZ, exe_path)
             else:
                 try:
-                    winreg.DeleteValue(key, "Tame")
+                    winreg.DeleteValue(key, "Dolphin")
                 except:
                     pass
             winreg.CloseKey(key)
@@ -942,9 +1066,9 @@ class TameGUI:
             current_leeway = self.limiter.current_leeway_db
             base_leeway = self.limiter.base_leeway_db
             if current_leeway > base_leeway:
-                self.dynamic_leeway_label.config(text=f"{current_leeway:.1f}dB (+{current_leeway - base_leeway:.1f})", foreground="orange")
+                self.dynamic_leeway_label.config(text=f"{current_leeway:.1f}dB (+{current_leeway - base_leeway:.1f})", foreground="#ffa500")
             else:
-                self.dynamic_leeway_label.config(text=f"{current_leeway:.1f}dB", foreground="blue")
+                self.dynamic_leeway_label.config(text=f"{current_leeway:.1f}dB", foreground="#4a9eff")
             
             # Update graph with raw peak level
             self.peak_history.pop(0)
@@ -956,7 +1080,7 @@ class TameGUI:
         self.root.after(100, self._schedule_ui_update)
     
     def _draw_graph(self):
-        """Draw the audio level graph"""
+        """Draw the audio level graph with threshold and dynamic leeway indicators"""
         canvas = self.graph_canvas
         canvas.delete("all")
         
@@ -969,33 +1093,102 @@ class TameGUI:
         
         num_points = len(self.peak_history)
         
-        # Draw threshold line - this is where limiting kicks in
+        # Calculate threshold as peak level
         # Limiting starts when peak * original_volume > volume_cap
         # So threshold peak = volume_cap / original_volume
         original_vol = self.limiter.original_volume if self.limiter.original_volume > 0 else 1.0
         threshold = min(1.0, self.limiter.volume_cap / original_vol)
-        cap_y = h - (threshold * h)
-        canvas.create_line(0, cap_y, w, cap_y, fill='#ff4444', width=1, dash=(4, 2))
+        threshold_y = h - (threshold * h)
+        
+        # Calculate dynamic leeway threshold (stabilizer)
+        # Current leeway in dB -> linear factor: 10^(dB/20)
+        leeway_factor = 10 ** (self.limiter.current_leeway_db / 20)
+        dynamic_threshold = min(1.0, threshold * leeway_factor)
+        dynamic_threshold_y = h - (dynamic_threshold * h)
+        
+        # Draw dynamic leeway zone (shaded area between threshold and dynamic threshold)
+        if self.limiter.stabilizer_enabled and self.limiter.current_leeway_db > self.limiter.base_leeway_db:
+            canvas.create_rectangle(0, dynamic_threshold_y, w, threshold_y, 
+                                   fill='#4a3000' if self.is_dark_mode else '#ffe4b3', outline='')
+        
+        # Draw threshold line (red, solid)
+        canvas.create_line(0, threshold_y, w, threshold_y, fill='#ff4444', width=2)
+        
+        # Draw dynamic leeway line (orange, dashed) if stabilizer is active
+        if self.limiter.stabilizer_enabled:
+            canvas.create_line(0, dynamic_threshold_y, w, dynamic_threshold_y, 
+                              fill='#ffa500', width=1, dash=(6, 3))
         
         # Draw waveform
         if num_points < 2:
             return
         
         step = w / (num_points - 1)
-        points = []
+        
+        # Collect points for below and above threshold
+        below_segments = []
+        above_segments = []
+        current_segment = []
+        last_above = None
         
         for i, peak in enumerate(self.peak_history):
             x = i * step
             y = h - (peak * h)
-            points.extend([x, y])
-        
-        if len(points) >= 4:
-            # Draw filled area under the line
-            fill_points = [0, h] + points + [w, h]
-            canvas.create_polygon(fill_points, fill='#2d5a2d', outline='')
+            is_above = peak > threshold
             
-            # Draw the line on top
-            canvas.create_line(points, fill='#44ff44', width=2, smooth=True)
+            if last_above is None:
+                last_above = is_above
+                current_segment = [(x, y)]
+            elif is_above == last_above:
+                current_segment.append((x, y))
+            else:
+                # Transition point - interpolate crossing
+                prev_peak = self.peak_history[i - 1]
+                if threshold != prev_peak and peak != prev_peak:
+                    t = (threshold - prev_peak) / (peak - prev_peak)
+                    cross_x = (i - 1 + t) * step
+                    cross_y = h - (threshold * h)
+                    current_segment.append((cross_x, cross_y))
+                
+                if last_above:
+                    above_segments.append(current_segment)
+                else:
+                    below_segments.append(current_segment)
+                
+                current_segment = [(cross_x, cross_y) if threshold != prev_peak and peak != prev_peak else (x, y), (x, y)]
+                last_above = is_above
+        
+        # Add final segment
+        if current_segment:
+            if last_above:
+                above_segments.append(current_segment)
+            else:
+                below_segments.append(current_segment)
+        
+        # Draw filled area under below-threshold segments
+        fill_color = '#2d5a2d' if self.is_dark_mode else '#c8e6c9'
+        line_color = '#44ff44' if self.is_dark_mode else '#2e7d32'
+        above_line_color = '#ff6b6b' if self.is_dark_mode else '#d32f2f'
+        
+        for segment in below_segments:
+            if len(segment) >= 2:
+                points = []
+                for x, y in segment:
+                    points.extend([x, y])
+                # Fill area
+                fill_pts = [segment[0][0], h] + points + [segment[-1][0], h]
+                canvas.create_polygon(fill_pts, fill=fill_color, outline='')
+                # Draw solid line
+                canvas.create_line(points, fill=line_color, width=2, smooth=True)
+        
+        # Draw above-threshold segments as dashed lines (no fill)
+        for segment in above_segments:
+            if len(segment) >= 2:
+                points = []
+                for x, y in segment:
+                    points.extend([x, y])
+                # Draw dashed line for above threshold
+                canvas.create_line(points, fill=above_line_color, width=2, dash=(4, 4))
     
     def _position_window(self):
         self.root.update_idletasks()
@@ -1023,7 +1216,7 @@ class TameGUI:
             pystray.MenuItem("Exit", self._exit_app)
         )
         
-        self.tray_icon = pystray.Icon("Tame", create_icon(), "Tame - Volume Limiter", menu)
+        self.tray_icon = pystray.Icon("Dolphin", create_icon(), "Dolphin - Volume Limiter", menu)
         
         # Run tray icon in separate thread
         tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
@@ -1065,7 +1258,7 @@ def main():
     start_minimized = "--minimized" in sys.argv
     
     root = tk.Tk()
-    app = TameGUI(root, start_minimized=start_minimized)
+    app = DolphinGUI(root, start_minimized=start_minimized)
     root.mainloop()
 
 
