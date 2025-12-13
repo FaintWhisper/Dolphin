@@ -10,8 +10,10 @@ A Windows audio volume limiter that automatically reduces system volume when aud
 - Soft-knee limiting with adjustable leeway (dB)
 - Stabilizer mode for dynamic leeway adjustment
 - Dark/Light mode toggle
-- System tray integration with minimize-to-tray support
-- Windows startup integration (starts minimized when enabled)
+- Mini Mode toggle (compact window + always on top)
+- Global hotkeys (Ctrl+Alt+Up/Down adjust Volume Cap, Ctrl+Alt+Y toggles enabled)
+- System tray integration with minimize-to-tray support (requires `pystray` + `Pillow`)
+- Windows startup integration (can start minimized when tray support is available)
 - Persistent settings stored in `%APPDATA%\dolphin\settings.json`
 
 ## Installation
@@ -50,7 +52,18 @@ build.bat
 1. Launch `Dolphin.exe` or run `python dolphin.py`
 2. Adjust the **Volume Cap** slider to set your maximum output level (default: 20%)
 3. The limiter monitors audio in real-time and reduces volume when peaks exceed the threshold
-4. Close the window to minimize to system tray (configurable)
+4. Close the window to minimize to system tray (configurable; only when tray support is available)
+
+### Mini Mode
+
+Use the **Mini Mode** toggle to switch to a compact always-on-top window.
+The compact layout now keeps abbreviated audio (`A`), system (`S`), and threshold (`T`) readouts in view so you can watch the limiter state at a glance.
+
+### Global Hotkeys
+
+- **Ctrl+Alt+Plus (+) / Numpad+**: Increase Volume Cap by 1%
+- **Ctrl+Alt+Minus (-) / Numpad-**: Decrease Volume Cap by 1%
+- **Ctrl+Alt+Y**: Toggle limiter enabled/disabled
 
 ## Configuration
 
@@ -61,7 +74,7 @@ build.bat
 | Volume Cap | Maximum allowed output level (0-100%) | 20% |
 | Dark Mode | Enable dark theme (light theme available) | On |
 | Run at Windows startup | Auto-start Dolphin when Windows boots | Off |
-| Minimize to tray on close | Hide to tray instead of exiting | On |
+| Minimize to tray on close | Hide to tray instead of exiting (requires tray support; otherwise forced off) | On |
 
 ### Advanced Limiter Settings
 
@@ -115,7 +128,7 @@ The limiter respects manual volume changes by pausing automatic control for the 
   - Dark mode: #1e1e1e background with light text (default)
   - Light mode: #f5f5f5 background with dark text
   - Real-time theme switching with persistent preferences
-- **System Tray**: `pystray` with PIL for icon generation
+- **System Tray**: `pystray` with PIL for icon generation (optional; if not installed, tray/minimize features are disabled)
 - **Packaging**: PyInstaller single-file executable
 
 ### Dependencies

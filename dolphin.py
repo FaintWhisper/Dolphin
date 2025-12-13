@@ -7,11 +7,14 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox
+import tkinter.font as tkfont
+from tkinter import ttk
 import json
 import os
 from pathlib import Path
 import winreg
+import ctypes
+from ctypes import wintypes
 from comtypes import CLSCTX_ALL
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume, IAudioMeterInformation
 from ctypes import cast, POINTER
@@ -22,6 +25,111 @@ try:
     TRAY_AVAILABLE = True
 except ImportError:
     TRAY_AVAILABLE = False
+
+
+class GlobalHotkeyListener:
+    """Windows-only global hotkey listener using RegisterHotKey + message loop."""
+
+    WM_HOTKEY = 0x0312
+    WM_QUIT = 0x0012
+
+    MOD_ALT = 0x0001
+    MOD_CONTROL = 0x0002
+    MOD_SHIFT = 0x0004
+    MOD_WIN = 0x0008
+
+    VK_UP = 0x26
+    VK_DOWN = 0x28
+    VK_OEM_PLUS = 0xBB   # + key
+    VK_OEM_MINUS = 0xBD  # - key
+    VK_ADD = 0x6B        # Numpad +
+    VK_SUBTRACT = 0x6D   # Numpad -
+    VK_Y = 0x59
+
+    def __init__(self, on_increase_threshold, on_decrease_threshold, on_toggle_enabled):
+        self._on_inc = on_increase_threshold
+        self._on_dec = on_decrease_threshold
+        self._on_toggle = on_toggle_enabled
+
+        self._stop = threading.Event()
+        self._thread = None
+        self._thread_id = None
+        self._registered_ids = []
+
+    def start(self):
+        if sys.platform != "win32":
+            return
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if sys.platform != "win32":
+            return
+        self._stop.set()
+        try:
+            if self._thread_id:
+                ctypes.windll.user32.PostThreadMessageW(self._thread_id, self.WM_QUIT, 0, 0)
+        except Exception:
+            pass
+        if self._thread:
+            self._thread.join(timeout=1.0)
+
+    def _run(self):
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        self._thread_id = kernel32.GetCurrentThreadId()
+
+        # Default hotkeys:
+        # - Ctrl+Alt+Plus / Ctrl+Alt+Numpad+ : increase Volume Cap
+        # - Ctrl+Alt+Minus / Ctrl+Alt+Numpad- : decrease Volume Cap
+        # - Ctrl+Alt+Y : toggle limiter enabled/disabled
+        hotkeys = [
+            (1, self.MOD_CONTROL | self.MOD_ALT, self.VK_OEM_PLUS),
+            (2, self.MOD_CONTROL | self.MOD_ALT, self.VK_OEM_MINUS),
+            (3, self.MOD_CONTROL | self.MOD_ALT, self.VK_ADD),
+            (4, self.MOD_CONTROL | self.MOD_ALT, self.VK_SUBTRACT),
+            (5, self.MOD_CONTROL | self.MOD_ALT, self.VK_Y),
+        ]
+
+        self._registered_ids.clear()
+        for hotkey_id, modifiers, vk in hotkeys:
+            try:
+                if user32.RegisterHotKey(None, hotkey_id, modifiers, vk):
+                    self._registered_ids.append(hotkey_id)
+            except Exception:
+                pass
+
+        msg = wintypes.MSG()
+        try:
+            while not self._stop.is_set():
+                ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if ret == 0 or ret == -1:
+                    break
+
+                if msg.message == self.WM_HOTKEY:
+                    hotkey_id = msg.wParam
+                    try:
+                        if hotkey_id in (1, 3):
+                            self._on_inc()
+                        elif hotkey_id in (2, 4):
+                            self._on_dec()
+                        elif hotkey_id == 5:
+                            self._on_toggle()
+                    except Exception:
+                        pass
+
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+        finally:
+            for hotkey_id in self._registered_ids:
+                try:
+                    user32.UnregisterHotKey(None, hotkey_id)
+                except Exception:
+                    pass
+            self._registered_ids.clear()
 
 
 class Settings:
@@ -49,7 +157,6 @@ class Settings:
                     self.leeway_db = data.get('leeway_db', 3.0)  # 3dB leeway
                     self.dampening = data.get('dampening', 1.0)  # 1x (no dampening by default)
                     self.dampening_speed = data.get('dampening_speed', 0.0)  # 0s (instant) by default
-                    self.voice_mode = data.get('voice_mode', False)
                     # Stabilizer settings
                     self.stabilizer_enabled = data.get('stabilizer_enabled', False)
                     self.stabilizer_window = data.get('stabilizer_window', 5.0)  # 5s time window
@@ -58,7 +165,8 @@ class Settings:
                     self.stabilizer_step = data.get('stabilizer_step', 1.0)  # dB step per adjustment
                     self.stabilizer_change_threshold = data.get('stabilizer_change_threshold', 0.05)  # 5% change
                     self.dark_mode = data.get('dark_mode', True)  # Dark mode by default
-            except:
+                    self.mini_mode = data.get('mini_mode', False)
+            except (OSError, ValueError):
                 self.set_defaults()
         else:
             self.set_defaults()
@@ -74,7 +182,6 @@ class Settings:
         self.leeway_db = 3.0      # 3dB leeway above threshold
         self.dampening = 1.0      # 1x (no dampening by default)
         self.dampening_speed = 0.0  # 0s (instant) by default
-        self.voice_mode = False
         # Stabilizer settings
         self.stabilizer_enabled = False
         self.stabilizer_window = 5.0   # 5s time window
@@ -83,6 +190,7 @@ class Settings:
         self.stabilizer_step = 1.0     # dB step per adjustment
         self.stabilizer_change_threshold = 0.05  # 5% volume change counts
         self.dark_mode = True  # Dark mode by default
+        self.mini_mode = False
     
     def save(self):
         data = {
@@ -96,14 +204,14 @@ class Settings:
             'leeway_db': self.leeway_db,
             'dampening': self.dampening,
             'dampening_speed': self.dampening_speed,
-            'voice_mode': self.voice_mode,
             'stabilizer_enabled': self.stabilizer_enabled,
             'stabilizer_window': self.stabilizer_window,
             'stabilizer_threshold': self.stabilizer_threshold,
             'stabilizer_max_leeway': self.stabilizer_max_leeway,
             'stabilizer_step': self.stabilizer_step,
             'stabilizer_change_threshold': self.stabilizer_change_threshold,
-            'dark_mode': self.dark_mode
+            'dark_mode': self.dark_mode,
+            'mini_mode': self.mini_mode
         }
         with open(self.settings_file, 'w') as f:
             json.dump(data, f, indent=2)
@@ -114,8 +222,18 @@ class ToggleSwitch(tk.Canvas):
     
     def __init__(self, parent, variable=None, command=None, text="", 
                  width=50, height=26, on_color="#4ade80", off_color="#505050", bg="#1e1e1e", fg="#ffffff"):
-        super().__init__(parent, width=width + 180, height=max(height, 32), 
-                        bg=bg, highlightthickness=0)
+        
+        # --- FIX START: Calculate dynamic width based on text length ---
+        # We create a font object matching the one used in _draw ('Arial', 14)
+        f = tkfont.Font(family='Arial', size=14)
+        text_width = f.measure(text)
+        
+        # The total width is the switch (width) + padding (15) + the text length
+        total_width = width + 15 + text_width
+        # --- FIX END ---
+
+        super().__init__(parent, width=total_width, height=max(height, 32), 
+                         bg=bg, highlightthickness=0)
         
         self.width = width
         self.height = height
@@ -153,11 +271,11 @@ class ToggleSwitch(tk.Canvas):
         # Draw thumb (circle)
         thumb_x = self.width - self.height + 3 if is_on else 3
         self.create_oval(thumb_x, 3, thumb_x + self.height - 6, self.height - 3, 
-                        fill="white", outline="#ddd")
+                         fill="white", outline="#ddd")
         
         # Draw label text
         self.create_text(self.width + 10, self.height // 2, 
-                        text=self.text, anchor=tk.W, font=('Arial', 16), fill=self.fg_color)
+                text=self.text, anchor=tk.W, font=('Arial', 14), fill=self.fg_color)
     
     def _toggle(self, event=None):
         if self.variable:
@@ -190,7 +308,7 @@ class AudioController:
         """Get current audio peak level (0.0 to 1.0) - FAST"""
         try:
             return self._meter.GetPeakValue()
-        except:
+        except Exception:
             return 0.0
     
     def get_raw_peak(self):
@@ -202,7 +320,7 @@ class AudioController:
                 # Normalize: if volume is 50%, peak of 0.25 means raw audio is 0.5
                 return min(1.0, peak / vol)
             return peak
-        except:
+        except Exception:
             return 0.0
     
     def get_volume(self):
@@ -210,7 +328,7 @@ class AudioController:
         try:
             self._cached_volume = self._volume_ctrl.GetMasterVolumeLevelScalar()
             return self._cached_volume
-        except:
+        except Exception:
             return self._cached_volume
     
     def set_volume(self, level):
@@ -220,7 +338,7 @@ class AudioController:
             self._volume_ctrl.SetMasterVolumeLevelScalar(level, None)
             self._last_set_volume = level
             self._cached_volume = level
-        except:
+        except Exception:
             pass
     
     def check_user_changed(self):
@@ -263,9 +381,6 @@ class VolumeLimiter:
         self.dampening = settings.dampening        # Max dampening factor for sustained peaks
         self.dampening_speed = settings.dampening_speed  # Multiplier of attack_time to reach max dampening
         
-        # Voice mode - optimized for speech protection
-        self.voice_mode = settings.voice_mode
-        
         # Stabilizer mode
         self.stabilizer_enabled = settings.stabilizer_enabled
         self.stabilizer_window = settings.stabilizer_window
@@ -286,6 +401,7 @@ class VolumeLimiter:
         # Threading
         self._stop = threading.Event()
         self._thread = None
+        self._lock = threading.Lock()  # Protects shared state from GUI/hotkey threads
         
         # UI data (updated atomically)
         self.ui_peak = 0.0
@@ -353,141 +469,161 @@ class VolumeLimiter:
         last_time = time.time()
         
         while not self._stop.is_set():
-            if not self.is_running:
-                time.sleep(0.05)
-                self.time_over_threshold = 0.0  # Reset when disabled
-                continue
-            
-            now = time.time()
-            dt = now - last_time
-            last_time = now
-            
-            # Check for user volume changes - let user freely adjust
-            if self.audio.check_user_changed():
-                new_user_vol = self.audio.user_set_volume
-                self.original_volume = new_user_vol
-                self.is_limiting = False
-                self.time_over_threshold = 0.0
-            
-            # Skip if in user cooldown
-            if self.audio.user_set_time and (now - self.audio.user_set_time) < self.user_cooldown:
-                time.sleep(0.02)
-                continue
-            
-            # Get current peak level
-            raw_peak = self.audio.get_raw_peak()
-            self.current_peak = raw_peak
-            self.current_volume = self.audio.get_volume()
-            
-            # Calculate what the output would be at original volume
-            potential_output = raw_peak * self.original_volume
-            
-            # Calculate effective threshold with leeway
-            # leeway_db of 3 means allow ~1.41x (√2) over threshold before full limiting
-            # Convert dB to linear: 10^(dB/20)
-            leeway_factor = 10 ** (self.leeway_db / 20)
-            soft_threshold = self.volume_cap * leeway_factor  # Upper limit (hard cap)
-            
-            if potential_output > self.volume_cap and raw_peak > 0.001:
-                # Audio is over threshold - accumulate time
-                self.time_over_threshold += dt
-                self.last_over_threshold_time = now
+            try:
+                if not self.is_running:
+                    time.sleep(0.05)
+                    self.time_over_threshold = 0.0  # Reset when disabled
+                    continue
                 
-                if self.time_over_threshold >= self.attack_time:
-                    # Sustained peak detected - start or continue limiting
-                    if not self.is_limiting:
-                        self.is_limiting = True
-                    
-                    # Calculate how far into the leeway zone we are (0 to 1)
-                    # 0 = at volume_cap, 1 = at soft_threshold (max leeway)
-                    if potential_output >= soft_threshold:
-                        # Beyond leeway - full limiting
-                        leeway_ratio = 1.0
-                    else:
-                        # In leeway zone - partial limiting
-                        leeway_ratio = (potential_output - self.volume_cap) / (soft_threshold - self.volume_cap)
-                    
-                    # Reduction is proportional to how long over threshold
-                    # sustained_factor goes from 1.0 at attack_time to dampening over dampening_speed seconds
-                    time_since_attack = self.time_over_threshold - self.attack_time
-                    if self.dampening_speed > 0.001:
-                        # Ramp from 1.0 to dampening over dampening_speed seconds
-                        ramp_progress = min(1.0, time_since_attack / self.dampening_speed)
-                    else:
-                        # Instant dampening
-                        ramp_progress = 1.0
-                    sustained_factor = 1.0 + (self.dampening - 1.0) * ramp_progress
-                    sustained_factor = max(1.0, min(self.dampening, sustained_factor))
-                    
-                    # Target volume: softer reduction in leeway zone
-                    # At volume_cap: minimal reduction, at soft_threshold: full reduction
-                    base_target = self.volume_cap / raw_peak
-                    
-                    # Blend between original volume and base_target based on leeway_ratio
-                    target_volume = self.original_volume * (1 - leeway_ratio) + base_target * leeway_ratio
-                    
-                    # Apply sustained factor for longer peaks (divide = more reduction)
-                    target_volume = target_volume / sustained_factor
-                    target_volume = max(0.01, min(1.0, target_volume))
-                    
-                    self._track_volume_change(target_volume)
-                    self.audio.set_volume(target_volume)
-            else:
-                # Audio is under threshold
-                self.time_over_threshold = 0.0  # Reset accumulator
+                now = time.time()
+                dt = now - last_time
+                last_time = now
                 
-                if self.is_limiting:
-                    time_since_loud = now - self.last_over_threshold_time
+                # Check for user volume changes - let user freely adjust
+                if self.audio.check_user_changed():
+                    new_user_vol = self.audio.user_set_volume
+                    self.original_volume = new_user_vol
+                    self.is_limiting = False
+                    self.time_over_threshold = 0.0
+                
+                # Skip if in user cooldown
+                if self.audio.user_set_time and (now - self.audio.user_set_time) < self.user_cooldown:
+                    time.sleep(0.02)
+                    continue
+                
+                # Get current peak level
+                raw_peak = self.audio.get_raw_peak()
+                self.current_peak = raw_peak
+                self.current_volume = self.audio.get_volume()
+                
+                # Calculate what the output would be at original volume
+                potential_output = raw_peak * self.original_volume
+                
+                # Read settings atomically (GUI/hotkeys can modify these)
+                with self._lock:
+                    volume_cap = self.volume_cap
+                    leeway_db = self.leeway_db
+                    attack_time = self.attack_time
+                    dampening = self.dampening
+                    dampening_speed = self.dampening_speed
+                
+                # Calculate effective threshold with leeway
+                # leeway_db of 3 means allow ~1.41x (√2) over threshold before full limiting
+                # Convert dB to linear: 10^(dB/20)
+                leeway_factor = 10 ** (leeway_db / 20)
+                soft_threshold = volume_cap * leeway_factor  # Upper limit (hard cap)
+                
+                if potential_output > volume_cap and raw_peak > 0.001:
+                    # Audio is over threshold - accumulate time
+                    self.time_over_threshold += dt
+                    self.last_over_threshold_time = now
                     
-                    if time_since_loud > self.hold_time:
-                        # RELEASE: Gradually return to original volume
-                        current = self.audio.get_volume()
-                        target = self.original_volume
+                    if self.time_over_threshold >= attack_time:
+                        # Sustained peak detected - start or continue limiting
+                        if not self.is_limiting:
+                            self.is_limiting = True
                         
-                        if current < target - 0.005:
-                            # Increase volume gradually
-                            new_vol = current + self.release_rate * dt
-                            new_vol = min(new_vol, target)
-                            self._track_volume_change(new_vol)
-                            self.audio.set_volume(new_vol)
+                        # Calculate how far into the leeway zone we are (0 to 1)
+                        # 0 = at volume_cap, 1 = at soft_threshold (max leeway)
+                        if potential_output >= soft_threshold:
+                            # Beyond leeway - full limiting
+                            leeway_ratio = 1.0
                         else:
-                            # Reached original volume, stop limiting
-                            self._track_volume_change(target)
-                            self.audio.set_volume(target)
-                            self.is_limiting = False
-            
-            # Update UI data
-            self.ui_peak = self.audio.get_raw_peak()
-            self.ui_volume = self.audio.get_volume()
-            
-            # Stabilizer: adjust leeway based on volume change frequency
-            if self.stabilizer_enabled:
-                self._update_stabilizer(now)
+                            # In leeway zone - partial limiting
+                            leeway_ratio = (potential_output - volume_cap) / (soft_threshold - volume_cap)
+                        
+                        # Reduction is proportional to how long over threshold
+                        # sustained_factor goes from 1.0 at attack_time to dampening over dampening_speed seconds
+                        time_since_attack = self.time_over_threshold - attack_time
+                        if dampening_speed > 0.001:
+                            # Ramp from 1.0 to dampening over dampening_speed seconds
+                            ramp_progress = min(1.0, time_since_attack / dampening_speed)
+                        else:
+                            # Instant dampening
+                            ramp_progress = 1.0
+                        sustained_factor = 1.0 + (dampening - 1.0) * ramp_progress
+                        sustained_factor = max(1.0, min(dampening, sustained_factor))
+                        
+                        # Target volume: softer reduction in leeway zone
+                        # At volume_cap: minimal reduction, at soft_threshold: full reduction
+                        # Prevent division by zero with minimum threshold
+                        safe_peak = max(raw_peak, 0.01)
+                        base_target = volume_cap / safe_peak
+                        
+                        # Blend between original volume and base_target based on leeway_ratio
+                        target_volume = self.original_volume * (1 - leeway_ratio) + base_target * leeway_ratio
+                        
+                        # Apply sustained factor for longer peaks (divide = more reduction)
+                        target_volume = target_volume / sustained_factor
+                        target_volume = max(0.01, min(1.0, target_volume))
+                        
+                        self._track_volume_change(target_volume)
+                        self.audio.set_volume(target_volume)
+                else:
+                    # Audio is under threshold
+                    self.time_over_threshold = 0.0  # Reset accumulator
+                    
+                    if self.is_limiting:
+                        time_since_loud = now - self.last_over_threshold_time
+                        
+                        if time_since_loud > self.hold_time:
+                            # RELEASE: Gradually return to original volume
+                            current = self.audio.get_volume()
+                            target = self.original_volume
+                            
+                            if current < target - 0.005:
+                                # Increase volume gradually
+                                new_vol = current + self.release_rate * dt
+                                new_vol = min(new_vol, target)
+                                self._track_volume_change(new_vol)
+                                self.audio.set_volume(new_vol)
+                            else:
+                                # Reached original volume, stop limiting
+                                self._track_volume_change(target)
+                                self.audio.set_volume(target)
+                                self.is_limiting = False
+                
+                # Update UI data
+                self.ui_peak = self.audio.get_raw_peak()
+                self.ui_volume = self.audio.get_volume()
+                
+                # Stabilizer: adjust leeway based on volume change frequency
+                if self.stabilizer_enabled:
+                    self._update_stabilizer(now)
+            except Exception:
+                # Keep the thread alive; transient COM/tk errors shouldn't kill the loop.
+                time.sleep(0.05)
             
             # Sleep for ~50Hz update rate
             time.sleep(0.02)
     
     def save_settings(self):
-        self.settings.volume_cap = self.volume_cap
-        self.settings.attack_time = self.attack_time
-        self.settings.release_time = self.release_time
-        self.settings.hold_time = self.hold_time
-        self.settings.user_cooldown = self.user_cooldown
-        self.settings.leeway_db = self.base_leeway_db  # Save base leeway, not dynamic
-        self.settings.dampening = self.dampening
-        self.settings.dampening_speed = self.dampening_speed
-        self.settings.voice_mode = self.voice_mode
-        self.settings.stabilizer_enabled = self.stabilizer_enabled
-        self.settings.stabilizer_window = self.stabilizer_window
-        self.settings.stabilizer_threshold = self.stabilizer_threshold
-        self.settings.stabilizer_max_leeway = self.stabilizer_max_leeway
-        self.settings.stabilizer_step = self.stabilizer_step
-        self.settings.stabilizer_change_threshold = self.stabilizer_change_threshold
+        with self._lock:
+            self.settings.volume_cap = self.volume_cap
+            self.settings.attack_time = self.attack_time
+            self.settings.release_time = self.release_time
+            self.settings.hold_time = self.hold_time
+            self.settings.user_cooldown = self.user_cooldown
+            self.settings.leeway_db = self.base_leeway_db  # Save base leeway, not dynamic
+            self.settings.dampening = self.dampening
+            self.settings.dampening_speed = self.dampening_speed
+            self.settings.stabilizer_enabled = self.stabilizer_enabled
+            self.settings.stabilizer_window = self.stabilizer_window
+            self.settings.stabilizer_threshold = self.stabilizer_threshold
+            self.settings.stabilizer_max_leeway = self.stabilizer_max_leeway
+            self.settings.stabilizer_step = self.stabilizer_step
+            self.settings.stabilizer_change_threshold = self.stabilizer_change_threshold
         self.settings.save()
 
 
 class DolphinGUI:
     """Lightweight GUI"""
+
+    VOLUME_CAP_MIN = 0.05
+    VOLUME_CAP_MAX = 1.0
+    VOLUME_CAP_HOTKEY_STEP = 0.01  # 1% per press
+
+    MINI_MODE_SIZE = (520, 260)
     
     # Dark mode color scheme
     DARK_BG = '#1e1e1e'
@@ -536,6 +672,10 @@ class DolphinGUI:
         self._setup_tray()
         
         self._create_widgets()
+
+        # Global hotkeys (Windows): Ctrl+Alt+Plus/Minus adjust Volume Cap, Ctrl+Alt+Y toggles enabled.
+        self._hotkeys = None
+        self._setup_hotkeys()
         
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         
@@ -546,11 +686,187 @@ class DolphinGUI:
         self._position_window()
         
         # Start minimized to tray if requested
-        if start_minimized:
+        self._exiting = False
+        if start_minimized and self.tray_icon:
             self.root.withdraw()
         
         # Start UI updates (slower rate)
         self._schedule_ui_update()
+
+        # Apply persisted mini mode after widgets exist
+        self._normal_geometry = None
+        self._apply_mini_mode(bool(getattr(self.settings, 'mini_mode', False)), remember_geometry=True)
+
+    def _toggle_mini_mode(self):
+        enabled = bool(self.mini_mode_var.get())
+        self.settings.mini_mode = enabled
+        self.settings.save()
+        self._apply_mini_mode(enabled, remember_geometry=True)
+
+    def _apply_mini_mode(self, enabled, remember_geometry):
+        if enabled:
+            if remember_geometry and not self._normal_geometry:
+                # Keep full geometry including position
+                self._normal_geometry = self.root.geometry()
+
+            try:
+                self.root.attributes('-topmost', True)
+            except Exception:
+                pass
+
+            if hasattr(self, 'cap_frame'):
+                self.cap_frame.pack_forget()
+            if hasattr(self, 'columns_frame'):
+                self.columns_frame.pack_forget()
+            if hasattr(self, 'graph_frame'):
+                self.graph_frame.pack_forget()
+
+            # Swap detailed level labels for abbreviated A/S/T when in mini mode.
+            if hasattr(self, 'audio_label_title'):
+                self.audio_label_title.pack_forget()
+            if hasattr(self, 'peak_label'):
+                self.peak_label.pack_forget()
+            if hasattr(self, 'system_label_title'):
+                self.system_label_title.pack_forget()
+            if hasattr(self, 'vol_label'):
+                self.vol_label.pack_forget()
+
+            # Mini mode UI: hide extra buttons/toggles (leave Enable/Disable + Mini Mode).
+            if hasattr(self, 'reset_btn'):
+                self.reset_btn.pack_forget()
+            if hasattr(self, 'dark_mode_toggle'):
+                self.dark_mode_toggle.pack_forget()
+            if hasattr(self, 'startup_toggle'):
+                self.startup_toggle.pack_forget()
+            if hasattr(self, 'minimize_toggle'):
+                self.minimize_toggle.pack_forget()
+
+            # Ensure mini mode toggle is visible.
+            if hasattr(self, 'mini_mode_toggle') and not self.mini_mode_toggle.winfo_manager():
+                self.mini_mode_toggle.pack(side=tk.LEFT, padx=0)
+
+            if hasattr(self, 'mini_info_frame'):
+                self._update_mini_threshold_label()
+                if not self.mini_info_frame.winfo_manager():
+                    self.mini_info_frame.pack(side=tk.LEFT, padx=0)
+
+            w, h = self.MINI_MODE_SIZE
+            try:
+                x = self.root.winfo_x()
+                y = self.root.winfo_y()
+                self.root.geometry(f"{w}x{h}+{x}+{y}")
+            except Exception:
+                self.root.geometry(f"{w}x{h}")
+        else:
+            try:
+                self.root.attributes('-topmost', False)
+            except Exception:
+                pass
+
+            # Restore packed widgets in a deterministic order.
+            # This avoids fragile pack(before/after=...) usage that can fail depending on state.
+            if hasattr(self, 'header_frame'):
+                self.header_frame.pack_forget()
+            if hasattr(self, 'cap_frame'):
+                self.cap_frame.pack_forget()
+            if hasattr(self, 'columns_frame'):
+                self.columns_frame.pack_forget()
+            if hasattr(self, 'levels_frame'):
+                self.levels_frame.pack_forget()
+            if hasattr(self, 'graph_frame'):
+                self.graph_frame.pack_forget()
+            if hasattr(self, 'bottom_frame'):
+                self.bottom_frame.pack_forget()
+
+            if hasattr(self, 'header_frame'):
+                self.header_frame.pack(fill=tk.X, pady=(0, 12))
+            if hasattr(self, 'cap_frame'):
+                self.cap_frame.pack(fill=tk.X, pady=0)
+            if hasattr(self, 'columns_frame'):
+                self.columns_frame.pack(fill=tk.X, pady=10)
+            if hasattr(self, 'levels_frame'):
+                self.levels_frame.pack(fill=tk.X, pady=10)
+            if hasattr(self, 'graph_frame'):
+                self.graph_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+            if hasattr(self, 'bottom_frame'):
+                self.bottom_frame.pack(fill=tk.X, pady=5)
+
+            # Restore detailed labels, hide mini info bar.
+            if hasattr(self, 'mini_info_frame'):
+                self.mini_info_frame.pack_forget()
+            if hasattr(self, 'audio_label_title'):
+                self.audio_label_title.pack(side=tk.LEFT)
+            if hasattr(self, 'peak_label'):
+                self.peak_label.pack(side=tk.LEFT, padx=(8, 40))
+            if hasattr(self, 'system_label_title'):
+                self.system_label_title.pack(side=tk.LEFT)
+            if hasattr(self, 'vol_label'):
+                self.vol_label.pack(side=tk.LEFT, padx=8)
+
+            # Restore bottom-row widgets in order.
+            if hasattr(self, 'btn_frame'):
+                for widget in (
+                    getattr(self, 'toggle_btn', None),
+                    getattr(self, 'reset_btn', None),
+                    getattr(self, 'dark_mode_toggle', None),
+                    getattr(self, 'startup_toggle', None),
+                    getattr(self, 'minimize_toggle', None),
+                    getattr(self, 'mini_mode_toggle', None),
+                ):
+                    if widget is not None:
+                        try:
+                            widget.pack_forget()
+                        except Exception:
+                            pass
+
+                if hasattr(self, 'toggle_btn'):
+                    self.toggle_btn.pack(side=tk.LEFT, padx=5)
+                if hasattr(self, 'reset_btn'):
+                    self.reset_btn.pack(side=tk.LEFT, padx=5)
+                if hasattr(self, 'dark_mode_toggle'):
+                    self.dark_mode_toggle.pack(side=tk.LEFT, padx=30)
+                if hasattr(self, 'startup_toggle'):
+                    self.startup_toggle.pack(side=tk.LEFT, padx=0)
+                if hasattr(self, 'minimize_toggle'):
+                    self.minimize_toggle.pack(side=tk.LEFT, padx=30)
+                if hasattr(self, 'mini_mode_toggle'):
+                    self.mini_mode_toggle.pack(side=tk.LEFT, padx=0)
+
+            if self._normal_geometry:
+                try:
+                    self.root.geometry(self._normal_geometry)
+                except Exception:
+                    pass
+
+    def _setup_hotkeys(self):
+        if sys.platform != "win32":
+            return
+
+        def inc():
+            self.root.after(0, lambda: self._adjust_volume_cap(self.VOLUME_CAP_HOTKEY_STEP))
+
+        def dec():
+            self.root.after(0, lambda: self._adjust_volume_cap(-self.VOLUME_CAP_HOTKEY_STEP))
+
+        def toggle():
+            self.root.after(0, self._toggle)
+
+        self._hotkeys = GlobalHotkeyListener(inc, dec, toggle)
+        self._hotkeys.start()
+
+    def _adjust_volume_cap(self, delta):
+        with self.limiter._lock:
+            new_cap = float(self.limiter.volume_cap) + float(delta)
+            new_cap = max(self.VOLUME_CAP_MIN, min(self.VOLUME_CAP_MAX, new_cap))
+            self.limiter.volume_cap = new_cap
+
+        if hasattr(self, 'slider_volume_cap'):
+            slider, var, label, unit, mult = self.slider_volume_cap
+            var.set(new_cap)
+            if unit == "%":
+                label.config(text=f"{int(new_cap * mult)}%")
+
+        self._update_mini_threshold_label()
     
     def _apply_theme(self):
         """Apply dark or light theme based on is_dark_mode"""
@@ -626,31 +942,33 @@ class DolphinGUI:
         self._draw_graph()
     
     def _create_widgets(self):
-        main = ttk.Frame(self.root, padding="15")
-        main.pack(fill=tk.BOTH, expand=True)
+        self.main_frame = ttk.Frame(self.root, padding="15")
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
         
         # Title and Status row
-        header_frame = ttk.Frame(main)
-        header_frame.pack(fill=tk.X, pady=(0, 12))
+        self.header_frame = ttk.Frame(self.main_frame)
+        self.header_frame.pack(fill=tk.X, pady=(0, 12))
         
-        ttk.Label(header_frame, text="Dolphin", font=('Arial', 28, 'bold')).pack(side=tk.LEFT)
+        ttk.Label(self.header_frame, text="Dolphin", font=('Arial', 28, 'bold')).pack(side=tk.LEFT)
         
-        status_frame = ttk.Frame(header_frame)
+        status_frame = ttk.Frame(self.header_frame)
         status_frame.pack(side=tk.RIGHT)
         ttk.Label(status_frame, text="Status:", font=('Arial', 16)).pack(side=tk.LEFT)
         self.status_label = ttk.Label(status_frame, text="Running", foreground="#4ade80", font=('Arial', 16, 'bold'))
         self.status_label.pack(side=tk.LEFT, padx=5)
         
         # === Volume Cap Slider ===
-        self._create_slider(main, "Volume Cap:", 0.05, 1.0, 0.01,
-                           self.limiter.volume_cap, self._on_cap_change, "%")
+        self.cap_frame = ttk.Frame(self.main_frame)
+        self.cap_frame.pack(fill=tk.X, pady=0)
+        self._create_slider(self.cap_frame, "Volume Cap:", 0.05, 1.0, 0.01,
+                   self.limiter.volume_cap, self._on_cap_change, "%")
         
         # === Side-by-side container for Advanced Settings and Stabilizer ===
-        columns_frame = ttk.Frame(main)
-        columns_frame.pack(fill=tk.X, pady=10)
+        self.columns_frame = ttk.Frame(self.main_frame)
+        self.columns_frame.pack(fill=tk.X, pady=10)
         
         # Left column: Advanced Settings
-        adv_frame = ttk.LabelFrame(columns_frame, text="Advanced Settings", padding="10", style='Big.TLabelframe')
+        adv_frame = ttk.LabelFrame(self.columns_frame, text="Advanced Settings", padding="10", style='Big.TLabelframe')
         adv_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
         
         # Attack Time (1ms to 100ms)
@@ -682,7 +1000,7 @@ class DolphinGUI:
                            self.limiter.dampening_speed, self._on_dampening_speed_change, "s", 1)
         
         # Right column: Stabilizer Settings
-        stab_frame = ttk.LabelFrame(columns_frame, text="Stabilizer", padding="10", style='Big.TLabelframe')
+        stab_frame = ttk.LabelFrame(self.columns_frame, text="Stabilizer", padding="10", style='Big.TLabelframe')
         stab_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
         
         # Stabilizer enable toggle
@@ -724,69 +1042,90 @@ class DolphinGUI:
         self.dynamic_leeway_label.pack(side=tk.LEFT, padx=5)
 
         # Audio level display
-        levels_frame = ttk.Frame(main)
-        levels_frame.pack(fill=tk.X, pady=10)
+        self.levels_frame = ttk.Frame(self.main_frame)
+        self.levels_frame.pack(fill=tk.X, pady=10)
         
-        ttk.Label(levels_frame, text="Audio Level:", font=('Arial', 16)).pack(side=tk.LEFT)
-        self.peak_label = ttk.Label(levels_frame, text="0%", width=6, font=('Arial', 16, 'bold'))
+        self.audio_label_title = ttk.Label(self.levels_frame, text="Audio Level:", font=('Arial', 16))
+        self.audio_label_title.pack(side=tk.LEFT)
+        self.peak_label = ttk.Label(self.levels_frame, text="0%", width=6, font=('Arial', 16, 'bold'))
         self.peak_label.pack(side=tk.LEFT, padx=(8, 40))
         
-        ttk.Label(levels_frame, text="System Vol:", font=('Arial', 16)).pack(side=tk.LEFT)
-        self.vol_label = ttk.Label(levels_frame, text="0%", width=6, font=('Arial', 16, 'bold'))
+        self.system_label_title = ttk.Label(self.levels_frame, text="System Vol:", font=('Arial', 16))
+        self.system_label_title.pack(side=tk.LEFT)
+        self.vol_label = ttk.Label(self.levels_frame, text="0%", width=6, font=('Arial', 16, 'bold'))
         self.vol_label.pack(side=tk.LEFT, padx=8)
+
+        # Mini-mode info bar (abbreviated A/S/T), displayed in place of the level titles when mini mode is on.
+        self.mini_info_frame = ttk.Frame(self.levels_frame)
+        self.mini_audio_label = ttk.Label(self.mini_info_frame, text="A: 0%", font=('Arial', 16, 'bold'))
+        self.mini_system_label = ttk.Label(self.mini_info_frame, text="S: 0%", font=('Arial', 16, 'bold'))
+        self.mini_mode_threshold_label = ttk.Label(self.mini_info_frame, text="T: 0%", font=('Arial', 16, 'bold'))
+        for label in (self.mini_audio_label, self.mini_system_label, self.mini_mode_threshold_label):
+            label.pack(side=tk.LEFT, padx=8)
+        self.mini_info_frame.pack_forget()
         
         # Audio level graph - larger now
-        graph_frame = ttk.Frame(main)
-        graph_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        self.graph_frame = ttk.Frame(self.main_frame)
+        self.graph_frame.pack(fill=tk.BOTH, expand=True, pady=10)
         
-        self.graph_canvas = tk.Canvas(graph_frame, width=1050, height=140, bg=self.theme_graph_bg, 
+        self.graph_canvas = tk.Canvas(self.graph_frame, width=1050, height=140, bg=self.theme_graph_bg, 
                                       highlightthickness=1, highlightbackground='#333')
         self.graph_canvas.pack(fill=tk.BOTH, expand=True)
         
         # Bottom buttons and toggles frame
-        bottom_frame = ttk.Frame(main)
-        bottom_frame.pack(fill=tk.X, pady=5)
+        self.bottom_frame = ttk.Frame(self.main_frame)
+        self.bottom_frame.pack(fill=tk.X, pady=5)
         
         # Left side: buttons
-        btn_frame = ttk.Frame(bottom_frame)
-        btn_frame.pack(side=tk.LEFT)
+        self.btn_frame = ttk.Frame(self.bottom_frame)
+        self.btn_frame.pack(side=tk.LEFT)
         
-        self.toggle_btn = ttk.Button(btn_frame, text="Disable", command=self._toggle)
-        self.toggle_btn.pack(side=tk.LEFT, padx=5)
+        self.toggle_btn = ttk.Button(self.btn_frame, text="Disable", command=self._toggle)
+        self.toggle_btn.pack(side=tk.LEFT, padx=3)
         
-        reset_btn = ttk.Button(btn_frame, text="Reset Defaults", command=self._reset_defaults)
-        reset_btn.pack(side=tk.LEFT, padx=5)
+        self.reset_btn = ttk.Button(self.btn_frame, text="Reset", command=self._reset_defaults)
+        self.reset_btn.pack(side=tk.LEFT, padx=3)
         
         # All toggles in a single frame, packed left together
         self.dark_mode_var = tk.BooleanVar(value=self.is_dark_mode)
-        dark_mode_toggle = ToggleSwitch(
-            btn_frame, text="Dark Mode",
+        self.dark_mode_toggle = ToggleSwitch(
+            self.btn_frame, text="Dark Mode",
             variable=self.dark_mode_var, command=self._toggle_dark_mode,
             width=55, height=28,
             bg=self.theme_bg, off_color=self.theme_toggle_off, fg=self.theme_fg
         )
-        dark_mode_toggle.pack(side=tk.LEFT, padx=30)
-        self.all_toggles.append(dark_mode_toggle)
+        self.dark_mode_toggle.pack(side=tk.LEFT, padx=10)
+        self.all_toggles.append(self.dark_mode_toggle)
         
         self.startup_var = tk.BooleanVar(value=self.settings.run_at_startup)
-        startup_toggle = ToggleSwitch(
-            btn_frame, text="Run at startup",
+        self.startup_toggle = ToggleSwitch(
+            self.btn_frame, text="Run at startup",
             variable=self.startup_var, command=self._on_startup_change,
             width=55, height=28,
             bg=self.theme_bg, off_color=self.theme_toggle_off, fg=self.theme_fg
         )
-        startup_toggle.pack(side=tk.LEFT, padx=0)
-        self.all_toggles.append(startup_toggle)
+        self.startup_toggle.pack(side=tk.LEFT, padx=0)
+        self.all_toggles.append(self.startup_toggle)
         
         self.minimize_var = tk.BooleanVar(value=self.settings.show_close_notifications)
-        minimize_toggle = ToggleSwitch(
-            btn_frame, text="Minimize to tray",
+        self.minimize_toggle = ToggleSwitch(
+            self.btn_frame, text="Minimize to tray",
             variable=self.minimize_var, command=self._on_minimize_change,
             width=55, height=28,
             bg=self.theme_bg, off_color=self.theme_toggle_off, fg=self.theme_fg
         )
-        minimize_toggle.pack(side=tk.LEFT, padx=30)
-        self.all_toggles.append(minimize_toggle)
+        self.minimize_toggle.pack(side=tk.LEFT, padx=10)
+        self.all_toggles.append(self.minimize_toggle)
+
+        self.mini_mode_var = tk.BooleanVar(value=bool(getattr(self.settings, 'mini_mode', False)))
+        self.mini_mode_toggle = ToggleSwitch(
+            self.btn_frame, text="Mini Mode",
+            variable=self.mini_mode_var, command=self._toggle_mini_mode,
+            width=55, height=28,
+            bg=self.theme_bg, off_color=self.theme_toggle_off, fg=self.theme_fg
+        )
+        self.mini_mode_toggle.pack(side=tk.LEFT, padx=0)
+        self.all_toggles.append(self.mini_mode_toggle)
     
     def _create_slider_compact(self, parent, label_text, from_, to, resolution, initial, callback, unit, multiplier=100):
         """Create a compact labeled slider with value display"""
@@ -904,55 +1243,71 @@ class DolphinGUI:
             label.config(text=f"{v:.1f}s")
     
     def _on_cap_change(self, val):
-        self.limiter.volume_cap = float(val)
+        with self.limiter._lock:
+            self.limiter.volume_cap = float(val)
+
+        self._update_mini_threshold_label()
     
     def _on_attack_change(self, val):
-        self.limiter.attack_time = float(val)
+        with self.limiter._lock:
+            self.limiter.attack_time = float(val)
     
     def _on_release_change(self, val):
-        self.limiter.release_time = float(val)
-        self.limiter._update_release_rate()
+        with self.limiter._lock:
+            self.limiter.release_time = float(val)
+            self.limiter._update_release_rate()
     
     def _on_hold_change(self, val):
-        self.limiter.hold_time = float(val)
+        with self.limiter._lock:
+            self.limiter.hold_time = float(val)
     
     def _on_cooldown_change(self, val):
-        self.limiter.user_cooldown = float(val)
+        with self.limiter._lock:
+            self.limiter.user_cooldown = float(val)
     
     def _on_leeway_change(self, val):
-        self.limiter.leeway_db = float(val)
-        self.limiter.base_leeway_db = float(val)  # Update base for stabilizer
-        self.limiter.current_leeway_db = float(val)  # Reset current
+        with self.limiter._lock:
+            self.limiter.leeway_db = float(val)
+            self.limiter.base_leeway_db = float(val)  # Update base for stabilizer
+            self.limiter.current_leeway_db = float(val)  # Reset current
     
     def _on_dampening_change(self, val):
-        self.limiter.dampening = float(val)
+        with self.limiter._lock:
+            self.limiter.dampening = float(val)
     
     def _on_dampening_speed_change(self, val):
-        self.limiter.dampening_speed = float(val)
+        with self.limiter._lock:
+            self.limiter.dampening_speed = float(val)
     
     def _on_stabilizer_change(self):
-        enabled = self.stabilizer_var.get()
-        self.limiter.stabilizer_enabled = enabled
-        # Reset dynamic leeway to base when disabled
-        if not enabled:
-            self.limiter.current_leeway_db = self.limiter.base_leeway_db
-            self.limiter.leeway_db = self.limiter.base_leeway_db
-            self.limiter.volume_change_times.clear()
+        with self.limiter._lock:
+            enabled = self.stabilizer_var.get()
+            self.limiter.stabilizer_enabled = enabled
+            # Reset dynamic leeway to base when disabled
+            if not enabled:
+                self.limiter.current_leeway_db = self.limiter.base_leeway_db
+                self.limiter.leeway_db = self.limiter.base_leeway_db
+                self.limiter.volume_change_times.clear()
     
     def _on_stab_window_change(self, val):
-        self.limiter.stabilizer_window = float(val)
+        with self.limiter._lock:
+            self.limiter.stabilizer_window = float(val)
     
     def _on_stab_threshold_change(self, val):
-        self.limiter.stabilizer_threshold = int(float(val))
+        with self.limiter._lock:
+            self.limiter.stabilizer_threshold = int(float(val))
     
     def _on_stab_max_leeway_change(self, val):
-        self.limiter.stabilizer_max_leeway = float(val)
+        with self.limiter._lock:
+            self.limiter.stabilizer_max_leeway = float(val)
     
     def _on_stab_step_change(self, val):
-        self.limiter.stabilizer_step = float(val)
+        with self.limiter._lock:
+            self.limiter.stabilizer_step = float(val)
     
     def _on_stab_change_threshold(self, val):
-        self.limiter.stabilizer_change_threshold = float(val)
+        with self.limiter._lock:
+            self.limiter.stabilizer_change_threshold = float(val)
     
     def _update_slider_displays(self):
         """Update all slider positions and labels to match current limiter values"""
@@ -982,19 +1337,27 @@ class DolphinGUI:
                     label.config(text=f"{int(value)} chg")
                 else:
                     label.config(text=f"{value:.1f}s")
+
+            self._update_mini_threshold_label()
+
+    def _update_mini_threshold_label(self):
+        if hasattr(self, 'mini_mode_threshold_label'):
+            pct = int(self.limiter.volume_cap * 100)
+            self.mini_mode_threshold_label.config(text=f"T: {pct}%")
     
     def _reset_defaults(self):
         """Reset advanced settings to defaults (preserves volume cap)"""
-        self.limiter.attack_time = 0.05  # 50ms
-        self.limiter.release_time = 0.5
-        self.limiter.hold_time = 0.15
-        self.limiter.user_cooldown = 2.0
-        self.limiter.leeway_db = 3.0     # 3dB leeway
-        self.limiter.base_leeway_db = 3.0
-        self.limiter.current_leeway_db = 3.0
-        self.limiter.dampening = 2.0     # 2x max dampening
-        self.limiter.dampening_speed = 0.1  # 100ms to reach max
-        self.limiter._update_release_rate()
+        with self.limiter._lock:
+            self.limiter.attack_time = 0.05  # 50ms
+            self.limiter.release_time = 0.5
+            self.limiter.hold_time = 0.15
+            self.limiter.user_cooldown = 2.0
+            self.limiter.leeway_db = 3.0     # 3dB leeway
+            self.limiter.base_leeway_db = 3.0
+            self.limiter.current_leeway_db = 3.0
+            self.limiter.dampening = 1.0     # 1x (no dampening by default)
+            self.limiter.dampening_speed = 0.0  # 0s (instant) by default
+            self.limiter._update_release_rate()
         
         # Reset stabilizer
         self.limiter.stabilizer_enabled = False
@@ -1009,8 +1372,11 @@ class DolphinGUI:
         self._update_slider_displays()
     
     def _toggle(self):
-        self.limiter.is_running = not self.limiter.is_running
-        if self.limiter.is_running:
+        with self.limiter._lock:
+            self.limiter.is_running = not self.limiter.is_running
+            is_running = self.limiter.is_running
+        
+        if is_running:
             self.toggle_btn.config(text="Disable")
             self.status_label.config(text="Running", foreground="green")
         else:
@@ -1029,22 +1395,27 @@ class DolphinGUI:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
             if self.settings.run_at_startup:
                 # Add --minimized flag if minimize to tray is also enabled
-                exe_path = sys.executable
-                if self.settings.show_close_notifications:
-                    exe_path = f'"{exe_path}" --minimized'
+                exe_path = f'"{sys.executable}"'
+                if self.settings.show_close_notifications and self.tray_icon:
+                    exe_path = f"{exe_path} --minimized"
                 winreg.SetValueEx(key, "Dolphin", 0, winreg.REG_SZ, exe_path)
             else:
                 try:
                     winreg.DeleteValue(key, "Dolphin")
-                except:
+                except FileNotFoundError:
                     pass
             winreg.CloseKey(key)
-        except:
+        except OSError:
             pass
     
     def _on_minimize_change(self):
         """Handle minimize to tray checkbox change"""
-        self.settings.show_close_notifications = self.minimize_var.get()
+        requested = bool(self.minimize_var.get())
+        if requested and not self.tray_icon:
+            # Tray not available; prevent the app from becoming inaccessible.
+            self.minimize_var.set(False)
+            requested = False
+        self.settings.show_close_notifications = requested
         self.settings.save()
         # Update registry if startup is enabled (to add/remove --minimized flag)
         if self.settings.run_at_startup:
@@ -1052,31 +1423,44 @@ class DolphinGUI:
     
     def _schedule_ui_update(self):
         """Update UI at 10Hz - much less CPU intensive"""
+        if self._exiting:
+            return
+
         try:
             peak = self.limiter.ui_peak  # Raw audio level (0-1)
             vol = self.limiter.ui_volume
-            
+
             # Show raw peak as percentage (this is the audio level relative to system volume)
             peak_pct = int(peak * 100)
             vol_pct = int(vol * 100)
             self.peak_label.config(text=f"{peak_pct}%")
             self.vol_label.config(text=f"{vol_pct}%")
-            
+
+            if hasattr(self, 'mini_audio_label'):
+                self.mini_audio_label.config(text=f"A: {peak_pct}%")
+            if hasattr(self, 'mini_system_label'):
+                self.mini_system_label.config(text=f"S: {vol_pct}%")
+
             # Update dynamic leeway display for stabilizer
             current_leeway = self.limiter.current_leeway_db
             base_leeway = self.limiter.base_leeway_db
             if current_leeway > base_leeway:
-                self.dynamic_leeway_label.config(text=f"{current_leeway:.1f}dB (+{current_leeway - base_leeway:.1f})", foreground="#ffa500")
+                self.dynamic_leeway_label.config(
+                    text=f"{current_leeway:.1f}dB (+{current_leeway - base_leeway:.1f})",
+                    foreground="#ffa500",
+                )
             else:
                 self.dynamic_leeway_label.config(text=f"{current_leeway:.1f}dB", foreground="#4a9eff")
-            
+
             # Update graph with raw peak level
             self.peak_history.pop(0)
             self.peak_history.append(peak)
             self._draw_graph()
-        except:
-            pass
-        
+        except tk.TclError:
+            # Window is likely shutting down.
+            return
+
+            self._update_mini_threshold_label()
         self.root.after(100, self._schedule_ui_update)
     
     def _draw_graph(self):
@@ -1096,7 +1480,7 @@ class DolphinGUI:
         # Calculate threshold as peak level
         # Limiting starts when peak * original_volume > volume_cap
         # So threshold peak = volume_cap / original_volume
-        original_vol = self.limiter.original_volume if self.limiter.original_volume > 0 else 1.0
+        original_vol = self.limiter.original_volume if self.limiter.original_volume > 0.001 else 1.0
         threshold = min(1.0, self.limiter.volume_cap / original_vol)
         threshold_y = h - (threshold * h)
         
@@ -1208,7 +1592,7 @@ class DolphinGUI:
             img = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
             draw.ellipse([8, 8, 56, 56], fill=(76, 175, 80, 255))
-            draw.text((22, 18), "M", fill=(255, 255, 255, 255))
+            draw.text((22, 18), "D", fill=(255, 255, 255, 255))
             return img
         
         menu = pystray.Menu(
@@ -1238,6 +1622,9 @@ class DolphinGUI:
     
     def _do_exit(self):
         """Actually exit (must be called from main thread)"""
+        self._exiting = True
+        if self._hotkeys:
+            self._hotkeys.stop()
         self.limiter.save_settings()
         self.limiter.stop()
         if self.tray_icon:
@@ -1245,7 +1632,7 @@ class DolphinGUI:
         self.root.destroy()
     
     def _on_closing(self):
-        if self.settings.show_close_notifications:
+        if self.settings.show_close_notifications and self.tray_icon:
             # Minimize to tray instead of closing
             self.root.withdraw()
             return
@@ -1258,7 +1645,7 @@ def main():
     start_minimized = "--minimized" in sys.argv
     
     root = tk.Tk()
-    app = DolphinGUI(root, start_minimized=start_minimized)
+    DolphinGUI(root, start_minimized=start_minimized)
     root.mainloop()
 
 
