@@ -19,7 +19,7 @@ if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
 REM Build with PyInstaller using spec file
-pyinstaller --clean Dolphin.spec
+venv\Scripts\python.exe -m PyInstaller --clean Dolphin.spec
 
 echo.
 if exist dist\Dolphin.exe (

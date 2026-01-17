@@ -291,12 +291,15 @@ class AudioController:
         # Get audio device once and cache interfaces
         devices = AudioUtilities.GetSpeakers()
         
+        # pycaw >=20251023 wraps IMMDevice in AudioDevice, so access _dev for COM interface
+        imm_device = devices._dev if hasattr(devices, '_dev') else devices
+        
         # Volume control interface
-        vol_interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        vol_interface = imm_device.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
         self._volume_ctrl = cast(vol_interface, POINTER(IAudioEndpointVolume))
         
         # Audio meter interface for real peak levels
-        meter_interface = devices.Activate(IAudioMeterInformation._iid_, CLSCTX_ALL, None)
+        meter_interface = imm_device.Activate(IAudioMeterInformation._iid_, CLSCTX_ALL, None)
         self._meter = cast(meter_interface, POINTER(IAudioMeterInformation))
         
         self._cached_volume = self._volume_ctrl.GetMasterVolumeLevelScalar()
@@ -646,7 +649,7 @@ class DolphinGUI:
     def __init__(self, root, start_minimized=False):
         self.root = root
         self.root.title("Dolphin")
-        self.root.geometry("1200x850")
+        self.root.geometry("1200x900")
         self.root.resizable(False, False)
         
         # Initialize audio and limiter first (needed for dark_mode setting)
@@ -1456,11 +1459,10 @@ class DolphinGUI:
             self.peak_history.pop(0)
             self.peak_history.append(peak)
             self._draw_graph()
-        except tk.TclError:
-            # Window is likely shutting down.
-            return
-
-            self._update_mini_threshold_label()
+        except Exception:
+            # Window shutting down or transient COM/audio errors - don't break the loop
+            if self._exiting:
+                return
         self.root.after(100, self._schedule_ui_update)
     
     def _draw_graph(self):
